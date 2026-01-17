@@ -1,0 +1,66 @@
+Open Freedom License (OFL) v1.0
+
+Copyright (c) 2026 Lukas van Dee
+
+All rights reserved except as expressly granted below.
+
+DEFINITIONS
+
+"Software" refers to this source code and any associated files.
+"Derivative Work" refers to any modification, adaptation, translation, or work based upon the Software.
+"Commercial Use" refers to any use intended for or resulting in monetary compensation or other commercial advantage, including but not limited to:
+- selling the Software or Derivative Works,
+- offering paid services using the Software,
+- including the Software in paid products,
+- SaaS / hosted services with paid access,
+- advertising‑supported deployments.
+
+LICENSE GRANT
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of the Software to use, copy, modify, and distribute the Software and Derivative Works, subject to the following mandatory conditions:
+
+1. COPyleft / OPEN SOURCE REQUIREMENT
+
+Any distribution of the Software or Derivative Works must:
+
+a) be provided in full source code form, and  
+b) be licensed under this exact license (Open Freedom License v1.0), and  
+c) include this license text and all copyright notices.
+
+Closed‑source, obfuscated, or proprietary derivatives are strictly prohibited.
+
+2. NON‑COMMERCIAL USE ONLY
+
+Commercial Use of the Software or any Derivative Work is strictly prohibited without prior explicit written permission from the copyright holder.
+
+This restriction applies regardless of whether the Software itself is modified or unmodified.
+
+Permission may be granted separately under a commercial license at the discretion of the copyright holder.
+
+3. NO ADDITIONAL RESTRICTIONS
+
+You may not impose any additional legal, technical, or contractual restrictions that would limit the rights granted by this license to other recipients.
+
+4. ATTRIBUTION
+
+All copies and Derivative Works must retain:
+
+- the original copyright notice,
+- this license text,
+- and clear attribution to the original author.
+
+5. TERMINATION
+
+Any violation of this license automatically terminates your rights under this license immediately and permanently.
+
+6. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON‑INFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
+
+ACCEPTANCE
+
+By using, copying, modifying, or distributing the Software, you agree to be bound by the terms of this license.

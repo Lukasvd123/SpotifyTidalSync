@@ -1,0 +1,8 @@
+spotipy
+tidalapi
+python-vlc
+requests
+pillow
+python-dotenv
+pyinstaller
+keyring
