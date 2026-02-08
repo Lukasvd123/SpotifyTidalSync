@@ -1,0 +1,41 @@
+# Credentials / secrets
+.env
+
+# Build output
+_build/
+dist/
+build/
+*.spec
+*.exe
+
+# Converted icon (generated from logo.png during build)
+assets/*.ico
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.claude/
+.codex/
+.gemini/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs
+*.log
+debug.log

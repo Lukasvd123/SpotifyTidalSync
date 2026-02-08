@@ -8,20 +8,31 @@ This tool is designed for users who prefer the music discovery and UI of Spotify
 
 * **Real-time Sync:** Automatically detects track changes on Spotify and plays the corresponding track on Tidal.
 
+* **Local Playback Control:** Track advancement is based on local playback finishing, not Spotify's internal timing. No more premature skipping when track lengths differ slightly.
+
+* **Prefetch Cache:** Pre-fetches the next 4-5 songs from your Spotify queue in the background with rate-limiting, so track switches are near-instant.
+
 * **Smart Quality Fallback:** Tries to play in **HiRes/Max** quality first. If a track fails (e.g., region lock or API restriction), it automatically retries with Lossless or High quality to ensure music keeps playing.
+
+* **Seek Slider & Skip Controls:** Drag the seek bar to jump anywhere in the track, or use the **-10s / +10s** buttons to skip forward and backward.
 
 * **Manual Match Correction:** If the app picks the wrong song or a cover, click the **"Report Wrong Song / Fix Match"** button to manually search Tidal and map the correct track. This preference is saved permanently.
 
-* **Playback Control:** Pause, Play, Next, and Previous controls that sync seamlessly.
+* **Community Corrections:** Track corrections can optionally be shared with all users. On each startup the app syncs the latest community corrections from GitHub, and your own fixes can be submitted automatically to help others. You are prompted on first launch and can toggle this anytime in Settings.
 
-* **Smart Muting:** Can automatically mute the Spotify desktop app so you only hear the high-quality Tidal stream.
+* **Playback Control:** Pause, Play, Next, Previous, and seek controls that sync seamlessly.
+
+* **Smart Muting:** Can automatically mute the Spotify desktop app. On Windows, uses per-app audio muting (pycaw) for reliable silence. Falls back to API volume control if needed.
+
+* **Audio Isolation:** For complete Spotify audio isolation, the app guides you through setting up VB-Cable (free virtual audio cable) so Spotify outputs to a silent virtual device. See Settings > Audio Isolation.
 
 * **Auto-Favorite:** Optional setting to automatically add songs to your Tidal favorites if you listen to 90% of the track.
 
 * **Selectable Audio Output:** Choose your specific output device (DAC, Headphones, Speakers) within the app settings.
 
-* **Secure Session Caching:** * You only need to log in to Tidal once.
-  * Your tokens are securely stored in the **Windows Credential Manager** (or Linux Keyring) using `keyring`. They are encrypted and tied to your OS login.
+* **Secure Session Caching:** You only need to log in to Tidal once. Your tokens are securely stored in the **Windows Credential Manager** (or Linux Keyring) using `keyring`. They are encrypted and tied to your OS login.
+
+* **Browser Fallback:** If the app cannot open your browser during login, the URL is displayed in a dialog and copied to your clipboard so you can open it manually.
 
 ## Requirements
 
@@ -36,6 +47,8 @@ Before running or building the application, ensure you have the following:
   * [Download VLC Here](https://www.videolan.org/vlc/)
 
 * **Windows 10 or 11** (Linux supported via source)
+
+* **Python 3.10+** (only for building or running from source — the build script will install it for you if missing)
 
 ### 2. Service Accounts
 
@@ -68,13 +81,17 @@ You do **not** need to create configuration files manually. The build script han
 
 1. Open the project folder.
 
-2. Double-click `build_exe.bat`.
+2. Double-click `build_windows.bat`.
 
 3. **First Run:** The script will detect that `.env` is missing. It will generate a template file and pause.
 
+   * If Python is not installed, the script will offer to install it automatically. Type `y` to confirm.
+   * If Python is installed but not in your PATH, the script will find it automatically in common install locations.
+   * If pip is broken, the script will repair it using `ensurepip` or `get-pip.py`.
+
 4. **Edit Configuration:** Open the newly created `.env` file in Notepad. Paste your **Client ID** and **Client Secret** from Step 1. Save and close.
 
-5. **Second Run:** Double-click `build_exe.bat` again. It will now detect the configuration and compile the application.
+5. **Second Run:** Double-click `build_windows.bat` again. It will now detect the configuration, install dependencies, compile the application, and sign the executable.
 
 ## Installation & Running
 
@@ -82,17 +99,19 @@ You do **not** need to create configuration files manually. The build script han
 
 1. **Build** the app using the steps above.
 
-2. The finished `SpotifySync.exe` will appear in the `dist/` folder.
+2. The finished `SpotifySync.exe` will appear in the project folder.
 
 3. Double-click `SpotifySync.exe`.
 
-   * *Note: The first time you run the .exe, it extracts your configuration to `%APPDATA%\\SpotifyTidalSync`. You can move the .exe anywhere after that.*
+   * *Note: The first time you run the .exe, it extracts your configuration to `%APPDATA%\SpotifyTidalSync`. You can move the .exe anywhere after that.*
 
 4. **Authorization:**
 
    * A browser tab will open for **Spotify Login**. Click "Agree".
 
    * A browser tab will open for **Tidal Login**. Log in to your Tidal account.
+
+   * If your browser cannot be opened automatically, the URL will be shown in a dialog and copied to your clipboard.
 
 5. The app will open and begin waiting for Spotify activity.
 
@@ -107,8 +126,12 @@ If you are a developer or want to run the raw script:
    ```bash
    pip install -r requirements.txt
    ```
-   
-   *Make sure `keyring` is installed.*
+
+   On Windows, also install `pycaw` for per-app audio muting:
+
+   ```bash
+   pip install pycaw
+   ```
 
 3. **Run the script:**
 
@@ -120,16 +143,30 @@ If you are a developer or want to run the raw script:
 
 * **Audio Output:** Go to **Settings > General** to select your specific audio device (e.g., "External DAC").
 
-* **Wrong Song?** If the sync plays the wrong track, click the **"Report Wrong Song"** button on the main screen. Search for the correct track on Tidal, select it, and the app will remember this mapping forever.
+* **Wrong Song?** If the sync plays the wrong track, click the **"Report Wrong Song"** button on the main screen. Search for the correct track on Tidal, select it, and the app will remember this mapping forever. If you opted in, the correction is also shared with the community so everyone benefits.
 
-* **Muting Spotify:** In Settings, enable **"Mute Spotify Desktop App"**. This allows you to use the Spotify UI for control while hearing the audio strictly from Tidal/VLC.
+* **Community Corrections:** On first launch you'll be asked if you want to share corrections. You can change this anytime in **Settings > General > "Share track corrections with community"**. The app automatically downloads new community corrections from GitHub on each startup.
+
+* **Muting Spotify:** In Settings, enable **"Mute Spotify Desktop App"**. On Windows with pycaw installed, this mutes Spotify at the OS audio mixer level. Otherwise it sets Spotify's API volume to 0.
+
+* **Full Audio Isolation:** For complete silence from Spotify, go to **Settings > Audio Isolation** for instructions on setting up VB-Cable (free). This routes Spotify's audio to a virtual device that produces no sound.
+
+* **Seeking:** Use the seek slider to jump to any position in the track, or use the **-10s / +10s** buttons for quick skips.
 
 * **Resetting:** If you need to switch accounts or fix a login loop, go to **Settings > Factory Reset (Red Button)**. This wipes the settings file and securely deletes your tokens from the Windows Credential Manager.
+
+## Code Signing
+
+The build script signs the executable with a self-signed certificate. This reduces some antivirus false positives but **will not** bypass Windows SmartScreen or corporate security policies. For full trust on managed devices, an EV code signing certificate from a Certificate Authority (e.g., DigiCert, Sectigo) is required.
 
 ## Troubleshooting
 
 * **App crashes immediately:** Usually missing VLC 64-bit. Ensure it is installed.
 
-* **401 Unauthorized Errors:** The app now handles this automatically by lowering the quality for that specific song (e.g., from Max to High) until it plays.
+* **401 Unauthorized Errors:** The app handles this automatically by lowering the quality for that specific song (e.g., from Max to High) until it plays.
 
 * **Tidal Login fails:** Ensure you have an active subscription. Free accounts do not support API streaming.
+
+* **Browser won't open during login:** The app will show the login URL in a dialog and copy it to your clipboard. Open it manually in any browser.
+
+* **Premature track skipping:** This should be resolved in v0.02. The app now waits for local VLC playback to finish before advancing. If Spotify auto-advances while VLC is still playing, Spotify is paused until VLC catches up.
