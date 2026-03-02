@@ -1,16 +1,18 @@
 # Spotify to Tidal Sync Player
 
-A lightweight Windows desktop application that syncs your Spotify playback to Tidal in real-time. It detects what you are listening to on Spotify, finds the highest quality match on Tidal (HiFi/Master), and plays it seamlessly using an integrated VLC-based player.
+A lightweight Windows/Linux desktop application that detects what you are listening to on any media player, finds the highest quality match on Tidal (HiFi/Master), and plays it seamlessly using an integrated VLC-based player.
 
-This tool is designed for users who prefer the music discovery and UI of Spotify but demand the lossless audio quality of Tidal.
+By default the app uses **OS-level media detection** (Windows SMTC / Linux MPRIS) so it works with Spotify, Apple Music, YouTube, and any other media player. Optionally, you can enable the **Spotify API** in Settings for extra features like queue prefetch and seek sync.
+
+This tool is designed for users who prefer the music discovery and UI of their favorite player but demand the lossless audio quality of Tidal.
 
 ## Features
 
-* **Real-time Sync:** Automatically detects track changes on Spotify and plays the corresponding track on Tidal.
+* **OS Media Detection:** Automatically detects the currently playing track via Windows SMTC or Linux MPRIS. Works with any media player, not just Spotify.
 
-* **Local Playback Control:** Track advancement is based on local playback finishing, not Spotify's internal timing. No more premature skipping when track lengths differ slightly.
+* **Local Playback Control:** Track advancement is based on local playback finishing, not the source app's internal timing. No more premature skipping when track lengths differ slightly.
 
-* **Prefetch Cache:** Pre-fetches the next 4-5 songs from your Spotify queue in the background with rate-limiting, so track switches are near-instant.
+* **Optional Spotify API:** Enable in Settings > Spotify API for queue prefetch (pre-loads next 4-5 tracks), precise seek sync, and duration-based matching. Disabled by default.
 
 * **Smart Quality Fallback:** Tries to play in **HiRes/Max** quality first. If a track fails (e.g., region lock or API restriction), it automatically retries with Lossless or High quality to ensure music keeps playing.
 
@@ -20,15 +22,15 @@ This tool is designed for users who prefer the music discovery and UI of Spotify
 
 * **Community Corrections:** Track corrections can optionally be shared with all users. On each startup the app syncs the latest community corrections from GitHub, and your own fixes can be submitted automatically to help others. You are prompted on first launch and can toggle this anytime in Settings.
 
-* **Playback Control:** Pause, Play, Next, Previous, and seek controls that sync seamlessly.
+* **Playback Control:** Pause, Play, Next, Previous, and seek controls that sync seamlessly. Uses Spotify API when enabled, otherwise controls via OS media transport.
 
-* **Smart Muting:** Can automatically mute the Spotify desktop app. On Windows, uses per-app audio muting (pycaw) for reliable silence. Falls back to API volume control if needed.
+* **Smart Muting:** Can automatically mute the source app. On Windows, uses per-app audio muting (pycaw) for reliable silence.
 
-* **Audio Isolation:** For complete Spotify audio isolation, the app guides you through setting up VB-Cable (free virtual audio cable) so Spotify outputs to a silent virtual device. See Settings > Audio Isolation.
+* **Audio Isolation:** For complete audio isolation, the app guides you through setting up VB-Cable (free virtual audio cable) so your source app outputs to a silent virtual device. See Settings > Audio Isolation.
 
 * **Auto-Favorite:** Optional setting to automatically add songs to your Tidal favorites if you listen to 90% of the track.
 
-* **Selectable Audio Output:** Choose your specific output device (DAC, Headphones, Speakers) within the app settings.
+* **Selectable Audio Output:** Choose your specific output device (DAC, Headphones, Speakers) within the app settings. Device list is scrollable and adapts to your window size.
 
 * **Secure Session Caching:** You only need to log in to Tidal once. Your tokens are securely stored in the **Windows Credential Manager** (or Linux Keyring) using `keyring`. They are encrypted and tied to your OS login.
 
@@ -52,15 +54,29 @@ Before running or building the application, ensure you have the following:
 
 ### 2. Service Accounts
 
-* **Spotify Premium:** Required for full API playback control (Pause/Seek/Volume) and status syncing.
-
 * **Tidal HiFi or HiFi Plus:** Required to access the lossless audio streams via the API.
+
+* **Spotify Premium** (optional): Only needed if you enable the Spotify API in Settings for queue prefetch and seek sync.
 
 ## Setup Guide
 
-### 1. Get Spotify API Credentials
+### 1. Building
 
-To allow the app to see what you are playing, you need a Client ID and Secret from Spotify.
+No configuration files are needed before building. The build script handles everything.
+
+1. Open the project folder.
+
+2. Double-click `build_windows.bat`.
+
+   * If Python is not installed, the script will offer to install it automatically. Type `y` to confirm.
+   * If Python is installed but not in your PATH, the script will find it automatically in common install locations.
+   * If pip is broken, the script will repair it using `ensurepip` or `get-pip.py`.
+
+3. The script will install dependencies, compile the application, and sign the executable.
+
+### 2. (Optional) Enable Spotify API
+
+If you want queue prefetch and seek sync, you can enable the Spotify API after the app is running:
 
 1. Go to the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard/).
 
@@ -73,25 +89,9 @@ To allow the app to see what you are playing, you need a Client ID and Secret fr
 
 5. Save the app.
 
-6. Copy the **Client ID** and **Client Secret** for the next step.
+6. Copy the **Client ID** and **Client Secret**.
 
-### 2. Building & Configuration
-
-You do **not** need to create configuration files manually. The build script handles this for you.
-
-1. Open the project folder.
-
-2. Double-click `build_windows.bat`.
-
-3. **First Run:** The script will detect that `.env` is missing. It will generate a template file and pause.
-
-   * If Python is not installed, the script will offer to install it automatically. Type `y` to confirm.
-   * If Python is installed but not in your PATH, the script will find it automatically in common install locations.
-   * If pip is broken, the script will repair it using `ensurepip` or `get-pip.py`.
-
-4. **Edit Configuration:** Open the newly created `.env` file in Notepad. Paste your **Client ID** and **Client Secret** from Step 1. Save and close.
-
-5. **Second Run:** Double-click `build_windows.bat` again. It will now detect the configuration, install dependencies, compile the application, and sign the executable.
+7. In the app, go to **Settings > Spotify API**, check **"Enable Spotify API"**, enter your credentials, click **Save**, and restart.
 
 ## Installation & Running
 
@@ -103,17 +103,13 @@ You do **not** need to create configuration files manually. The build script han
 
 3. Double-click `SpotifySync.exe`.
 
-   * *Note: The first time you run the .exe, it extracts your configuration to `%APPDATA%\SpotifyTidalSync`. You can move the .exe anywhere after that.*
-
 4. **Authorization:**
-
-   * A browser tab will open for **Spotify Login**. Click "Agree".
 
    * A browser tab will open for **Tidal Login**. Log in to your Tidal account.
 
    * If your browser cannot be opened automatically, the URL will be shown in a dialog and copied to your clipboard.
 
-5. The app will open and begin waiting for Spotify activity.
+5. The app will open and begin waiting for media activity. Play something in Spotify (or any media player) and it will be detected automatically.
 
 ### Option B: Running from Source (Python)
 
@@ -127,10 +123,12 @@ If you are a developer or want to run the raw script:
    pip install -r requirements.txt
    ```
 
-   On Windows, also install `pycaw` for per-app audio muting:
+   On Windows, pycaw and winrt packages are installed automatically. On Linux, you may need `dbus-python` via your system package manager.
+
+   If you want Spotify API support, also install spotipy:
 
    ```bash
-   pip install pycaw
+   pip install spotipy
    ```
 
 3. **Run the script:**
@@ -141,17 +139,19 @@ If you are a developer or want to run the raw script:
 
 ## Usage Tips
 
-* **Audio Output:** Go to **Settings > General** to select your specific audio device (e.g., "External DAC").
+* **Audio Output:** Go to **Settings > General** to select your specific audio device (e.g., "External DAC"). The device list scrolls vertically if you have many devices.
 
 * **Wrong Song?** If the sync plays the wrong track, click the **"Report Wrong Song"** button on the main screen. Search for the correct track on Tidal, select it, and the app will remember this mapping forever. If you opted in, the correction is also shared with the community so everyone benefits.
 
 * **Community Corrections:** On first launch you'll be asked if you want to share corrections. You can change this anytime in **Settings > General > "Share track corrections with community"**. The app automatically downloads new community corrections from GitHub on each startup.
 
-* **Muting Spotify:** In Settings, enable **"Mute Spotify Desktop App"**. On Windows with pycaw installed, this mutes Spotify at the OS audio mixer level. Otherwise it sets Spotify's API volume to 0.
+* **Muting:** In Settings, enable **"Mute Source App (Spotify/etc)"**. On Windows with pycaw installed, this mutes the source app at the OS audio mixer level.
 
-* **Full Audio Isolation:** For complete silence from Spotify, go to **Settings > Audio Isolation** for instructions on setting up VB-Cable (free). This routes Spotify's audio to a virtual device that produces no sound.
+* **Full Audio Isolation:** For complete silence from your source app, go to **Settings > Audio Isolation** for instructions on setting up VB-Cable (free). This routes the source app's audio to a virtual device that produces no sound.
 
 * **Seeking:** Use the seek slider to jump to any position in the track, or use the **-10s / +10s** buttons for quick skips.
+
+* **Spotify API:** To enable queue prefetch and seek sync, go to **Settings > Spotify API**, check the toggle, enter your credentials from the Spotify Developer Dashboard, and restart the app.
 
 * **Resetting:** If you need to switch accounts or fix a login loop, go to **Settings > Factory Reset (Red Button)**. This wipes the settings file and securely deletes your tokens from the Windows Credential Manager.
 
@@ -163,10 +163,14 @@ The build script signs the executable with a self-signed certificate. This reduc
 
 * **App crashes immediately:** Usually missing VLC 64-bit. Ensure it is installed.
 
+* **No media detected:** Make sure you are playing music in a media player. On Windows, the app uses SMTC (System Media Transport Controls) — most modern players support this. Check that the `winrt-Windows.Media.Control` package is installed.
+
 * **401 Unauthorized Errors:** The app handles this automatically by lowering the quality for that specific song (e.g., from Max to High) until it plays.
 
 * **Tidal Login fails:** Ensure you have an active subscription. Free accounts do not support API streaming.
 
 * **Browser won't open during login:** The app will show the login URL in a dialog and copy it to your clipboard. Open it manually in any browser.
 
-* **Premature track skipping:** This should be resolved in v0.02. The app now waits for local VLC playback to finish before advancing. If Spotify auto-advances while VLC is still playing, Spotify is paused until VLC catches up.
+* **Premature track skipping:** The app waits for local VLC playback to finish before advancing. If the source app auto-advances while VLC is still playing, the source is paused until VLC catches up.
+
+* **Spotify API not connecting:** Make sure you've checked "Enable Spotify API" in Settings, entered valid credentials, and restarted the app. The redirect URI must be exactly `http://127.0.0.1:8888/callback` in your Spotify app settings.

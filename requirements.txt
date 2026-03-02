@@ -1,9 +1,10 @@
-spotipy
 tidalapi
 python-vlc
 requests
 pillow
-python-dotenv
 pyinstaller
 keyring
 pycaw; sys_platform == "win32"
+winrt-Windows.Media.Control; sys_platform == "win32"
+winrt-Windows.Foundation; sys_platform == "win32"
+dbus-python; sys_platform == "linux"

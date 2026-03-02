@@ -187,57 +187,7 @@ if (-not $pipWorks) {
 }
 
 # ==========================================
-# STEP 3: Check .env configuration
-# ==========================================
-
-if (-not (Test-Path ".env")) {
-    Write-Host "Creating new .env file..." -ForegroundColor Yellow
-
-    $envContent = @"
-# Spotify Configuration
-# Get these from https://developer.spotify.com/dashboard/applications
-SPOTIFY_CLIENT_ID=your_spotify_client_id_here
-SPOTIFY_CLIENT_SECRET=your_spotify_client_secret_here
-SPOTIFY_REDIRECT_URI=http://127.0.0.1:8888/callback
-
-# Application Settings
-DEBUG_MODE=False
-"@
-
-    $envContent | Out-File -FilePath ".env" -Encoding UTF8
-
-    Write-Host "[DONE] Created .env file." -ForegroundColor Green
-    Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Yellow
-    Write-Host "1. Open .env in Notepad"
-    Write-Host "2. Add your Spotify Client ID and Secret"
-    Write-Host "3. Run this script again"
-    Write-Host ""
-    pause
-    exit
-}
-
-$envContent = Get-Content ".env" -Raw
-
-if ($envContent -match "your_spotify_client_id_here") {
-    Write-Host "[ERROR] Your .env file is not configured yet." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Please edit .env and replace:" -ForegroundColor Yellow
-    Write-Host "  - your_spotify_client_id_here"
-    Write-Host "  - your_spotify_client_secret_here"
-    Write-Host ""
-    Write-Host "with your actual Spotify credentials from:" -ForegroundColor Yellow
-    Write-Host "https://developer.spotify.com/dashboard/applications"
-    Write-Host ""
-    pause
-    exit
-}
-
-Write-Host "[OK] Configuration verified." -ForegroundColor Green
-Write-Host ""
-
-# ==========================================
-# STEP 4: Sync community mappings
+# STEP 3: Sync community mappings
 # ==========================================
 
 $appdataDir = "$env:APPDATA\SpotifyTidalSync"
@@ -296,8 +246,8 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "The build will continue, but the exe may not work correctly." -ForegroundColor Yellow
 }
 
-Write-Host "Installing optional Windows audio control (pycaw)..." -ForegroundColor Cyan
-Run-Py -Arguments @("-m", "pip", "install", "pycaw") 2>&1 | Out-Null
+Write-Host "Installing optional Windows audio control (pycaw) and media detection (winrt)..." -ForegroundColor Cyan
+Run-Py -Arguments @("-m", "pip", "install", "pycaw", "winrt-Windows.Media.Control", "winrt-Windows.Foundation") 2>&1 | Out-Null
 
 Write-Host ""
 
@@ -346,7 +296,6 @@ Write-Host "Building executable..." -ForegroundColor Cyan
 
 New-Item -ItemType Directory -Path "_build" -Force | Out-Null
 
-$envPath = "$projectRoot\.env"
 $logoAsset = "$projectRoot\assets\logo.png"
 
 # Build PyInstaller command with absolute paths (avoids splatting issues)
@@ -354,7 +303,6 @@ $pyiArgs = @(
     "-m", "PyInstaller",
     "--noconsole",
     "--onefile",
-    "--add-data", "$envPath;.",
     "--name", "SpotifySync",
     "--distpath", "$projectRoot\_build\dist",
     "--workpath", "$projectRoot\_build\build",

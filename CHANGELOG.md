@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.03] - 2026-03-02
+
+### Added
+- **OS media detection**: Detects currently playing track via Windows SMTC or Linux MPRIS instead of polling the Spotify API. Works with any media player (Spotify, Apple Music, YouTube, etc.)
+- **Spotify API is now optional**: Credentials can be entered in Settings > Spotify API. When enabled, adds queue prefetch and precise seek sync. Disabled by default.
+- **Settings toggle for Spotify API**: Enable/disable checkbox in Settings > Spotify API with credential fields that show/hide accordingly
+- **Normalized track matching**: Track mappings now use normalized `title|artist` keys instead of Spotify IDs, making mappings source-agnostic
+- **Album art via iTunes API**: Fetches album art from the free iTunes Search API when OS detection doesn't provide art URLs
+- **Source indicator in UI**: Shows which app is being detected (e.g., "Source: Spotify | OS detection")
+- **OS media controls fallback**: Play/pause/next/previous controls work via OS media transport when Spotify API is unavailable
+- **winrt-based SMTC detection**: Uses pre-built `winrt-Windows.Media.Control` package (no C++ compiler required)
+- **MPRIS support on Linux**: Detects media via D-Bus MPRIS interface for Linux compatibility
+- **Dark title bar**: Main window and all settings/dialogs use the Windows dark title bar (DWM API) to match the dark UI theme
+
+### Changed
+- **No `.env` file required**: Removed all `.env` loading, `python-dotenv` dependency, and `extract_bundled_files()`. Spotify credentials are stored in the OS keyring via the Settings UI
+- **`spotipy` is no longer a required dependency**: Only needed when Spotify API is enabled; users install it manually if wanted
+- **Build scripts simplified**: Removed Step 3 (.env check/creation) from `build.ps1` and `--add-data ".env:."` from both build scripts
+- **Audio device selector**: Replaced fixed-width Combobox with a scrollable Listbox that adapts to window size (no more horizontal overflow)
+- **Mute fallback removed**: `_mute_spotify()` no longer falls back to Spotify API `volume(0)`, uses pycaw only
+- **Prefetch cache rekeyed**: Uses normalized mapping keys instead of Spotify track IDs
+- **App version bumped to 0.03**
+
+### Fixed
+- Audio device list overflowing the Settings window when device names are long
+- Text in Audio Isolation and Spotify API settings tabs overflowing outside the window — all labels now use `wraplength` to wrap within the window bounds
+- Backward compatibility with old Spotify-ID-based mappings in `mappings.json` (looked up as fallback)
+
 ## [v0.02] - 2026-02-08
 
 ### Added

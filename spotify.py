@@ -9,6 +9,9 @@ import json
 import queue
 import subprocess
 import platform
+import re
+import unicodedata
+import asyncio
 from datetime import timedelta, datetime
 from io import BytesIO
 
@@ -18,13 +21,19 @@ from tkinter import ttk, messagebox, scrolledtext, simpledialog
 from PIL import Image, ImageTk
 import requests
 
+# Conditional: Spotify API (optional)
+SPOTIPY_AVAILABLE = False
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
+    from spotipy.cache_handler import CacheHandler
+    SPOTIPY_AVAILABLE = True
+except ImportError:
+    pass
+
 # Audio / API Imports
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth
-from spotipy.cache_handler import CacheHandler
 import tidalapi
 import vlc
-from dotenv import load_dotenv
 
 # Secure Storage
 import keyring
@@ -34,8 +43,37 @@ PYCAW_AVAILABLE = False
 if platform.system() == "Windows":
     try:
         from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+        import comtypes
         from comtypes import CLSCTX_ALL
         PYCAW_AVAILABLE = True
+    except ImportError:
+        pass
+
+# Windows SMTC media detection (optional)
+SMTC_AVAILABLE = False
+if platform.system() == "Windows":
+    try:
+        from winrt.windows.media.control import (
+            GlobalSystemMediaTransportControlsSessionManager as SessionManager,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+        )
+        SMTC_AVAILABLE = True
+    except ImportError:
+        try:
+            from winsdk.windows.media.control import (
+                GlobalSystemMediaTransportControlsSessionManager as SessionManager,
+                GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
+            )
+            SMTC_AVAILABLE = True
+        except ImportError:
+            pass
+
+# Linux MPRIS media detection (optional)
+DBUS_AVAILABLE = False
+if platform.system() == "Linux":
+    try:
+        import dbus
+        DBUS_AVAILABLE = True
     except ImportError:
         pass
 
@@ -57,27 +95,14 @@ if not os.path.exists(APPDATA_DIR):
 
 SETTINGS_FILE = os.path.join(APPDATA_DIR, "settings.json")
 MAPPINGS_FILE = os.path.join(APPDATA_DIR, "mappings.json")
-ENV_FILE = os.path.join(APPDATA_DIR, ".env")
 LOG_FILE = os.path.join(APPDATA_DIR, "debug.log")
-
-# --- INITIALIZATION ---
-def extract_bundled_files():
-    if getattr(sys, 'frozen', False):
-        bundled_env = os.path.join(sys._MEIPASS, ".env")
-        if os.path.exists(bundled_env) and not os.path.exists(ENV_FILE):
-            try:
-                shutil.copy2(bundled_env, ENV_FILE)
-            except Exception: pass
-
-extract_bundled_files()
-load_dotenv(ENV_FILE)
 
 REFRESH_RATE = 1.0
 
 # --- COMMUNITY CORRECTIONS ---
 WORKER_URL = "https://correction-worker.lukas-van-dee.workers.dev"
 GITHUB_MAPPINGS_URL = "https://raw.githubusercontent.com/Lukasvd123/SpotifyTidalSync/main/mappings.json"
-APP_VERSION = "0.02"
+APP_VERSION = "0.03"
 
 # --- CLEAN LOGGING SETUP ---
 log_queue = queue.Queue()
@@ -93,7 +118,8 @@ class QueueHandler(logging.Handler):
 # Filter out verbose API logs
 logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("spotipy").setLevel(logging.WARNING)
+if SPOTIPY_AVAILABLE:
+    logging.getLogger("spotipy").setLevel(logging.WARNING)
 logging.getLogger("tidalapi").setLevel(logging.WARNING)
 
 logging.basicConfig(
@@ -110,40 +136,20 @@ logger = logging.getLogger("SyncApp")
 logger.setLevel(logging.DEBUG)
 
 # --- CREDENTIAL MANAGEMENT (KEYRING) ---
-def migrate_credentials_to_keyring():
-    env_id = os.getenv('SPOTIFY_CLIENT_ID')
-    env_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-
-    if env_id and env_secret and env_id != "your_pasted_client_id_here":
-        if not keyring.get_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID"):
-            try:
-                keyring.set_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID", env_id)
-                keyring.set_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_SECRET", env_secret)
-                logger.info("Migrated Spotify Credentials to Secure Keyring")
-            except Exception as e:
-                logger.error(f"Failed to migrate credentials to keyring: {e}")
-
 def get_credentials():
     client_id = keyring.get_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID")
     client_secret = keyring.get_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_SECRET")
-
-    if not client_id or not client_secret:
-        client_id = os.getenv('SPOTIFY_CLIENT_ID')
-        client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-
     return client_id, client_secret
-
-# Run Migration on Startup
-migrate_credentials_to_keyring()
-SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET = get_credentials()
-SPOTIFY_REDIRECT_URI = os.getenv('SPOTIFY_REDIRECT_URI', 'http://127.0.0.1:8888/callback')
 
 # --- DATA PERSISTENCE ---
 def load_json(filepath):
     try:
         if os.path.exists(filepath):
             with open(filepath, 'r') as f:
-                return json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return {}
+                return json.loads(content)
     except Exception as e:
         logger.error(f"Load error {filepath}: {e}")
     return {}
@@ -155,13 +161,13 @@ def save_json(filepath, data):
     except Exception as e:
         logger.error(f"Save error {filepath}: {e}")
 
-# Mappings: Spotify ID -> Tidal ID
+# Mappings: key -> Tidal ID (key can be spotify ID or normalized "title|artist")
 def load_mappings(): return load_json(MAPPINGS_FILE)
-def save_mapping(sp_id, tidal_id):
+def save_mapping(key, tidal_id):
     data = load_mappings()
-    data[sp_id] = tidal_id
+    data[key] = tidal_id
     save_json(MAPPINGS_FILE, data)
-    logger.info(f"Mapping saved: {sp_id} -> {tidal_id}")
+    logger.info(f"Mapping saved: {key} -> {tidal_id}")
 
 # Settings
 def load_settings(): return load_json(SETTINGS_FILE)
@@ -170,25 +176,45 @@ def save_setting(key, value):
     data[key] = value
     save_json(SETTINGS_FILE, data)
 
+# --- NORMALIZED MAPPING KEYS ---
+def normalize_text(text):
+    """Lowercase, strip accents, remove special chars for fuzzy matching."""
+    if not text:
+        return ""
+    text = text.lower().strip()
+    # Strip accents
+    text = unicodedata.normalize('NFD', text)
+    text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
+    # Remove special chars except spaces
+    text = re.sub(r'[^a-z0-9 ]', '', text)
+    # Collapse whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def make_mapping_key(title, artist):
+    """Create a normalized mapping key from title and artist."""
+    return f"{normalize_text(title)}|{normalize_text(artist)}"
+
 # --- SECURE TOKEN STORAGE ---
-class KeyringCacheHandler(CacheHandler):
-    def __init__(self, username_key="spotify_token"):
-        self.username_key = username_key
+if SPOTIPY_AVAILABLE:
+    class KeyringCacheHandler(CacheHandler):
+        def __init__(self, username_key="spotify_token"):
+            self.username_key = username_key
 
-    def get_cached_token(self):
-        try:
-            token_string = keyring.get_password(KEYRING_SERVICE, self.username_key)
-            if token_string:
-                return json.loads(token_string)
-        except Exception as e:
-            logger.warning(f"Keyring read error (Spotify): {e}")
-        return None
+        def get_cached_token(self):
+            try:
+                token_string = keyring.get_password(KEYRING_SERVICE, self.username_key)
+                if token_string:
+                    return json.loads(token_string)
+            except Exception as e:
+                logger.warning(f"Keyring read error (Spotify): {e}")
+            return None
 
-    def save_token_to_cache(self, token_info):
-        try:
-            keyring.set_password(KEYRING_SERVICE, self.username_key, json.dumps(token_info))
-        except Exception as e:
-            logger.error(f"Keyring write error (Spotify): {e}")
+        def save_token_to_cache(self, token_info):
+            try:
+                keyring.set_password(KEYRING_SERVICE, self.username_key, json.dumps(token_info))
+            except Exception as e:
+                logger.error(f"Keyring write error (Spotify): {e}")
 
 def get_tidal_quality():
     try:
@@ -225,7 +251,6 @@ def safe_open_browser(url, parent_window=None):
                 pass
             messagebox.showinfo("Browser Not Available", msg)
         else:
-            # No GUI available yet - print to console
             print(f"\n{'='*60}")
             print("BROWSER COULD NOT BE OPENED")
             print(f"{'='*60}")
@@ -236,40 +261,44 @@ def safe_open_browser(url, parent_window=None):
 def sync_community_mappings():
     """Fetch community corrections from GitHub and merge new entries into local mappings."""
     try:
+        logger.info("Fetching community mappings from GitHub...")
         resp = requests.get(GITHUB_MAPPINGS_URL, timeout=10)
         if resp.status_code == 200:
             community = resp.json()
             local = load_mappings()
             added = 0
-            for sp_id, tidal_id in community.items():
-                if sp_id not in local:
-                    local[sp_id] = tidal_id
+            for key, tidal_id in community.items():
+                if key not in local:
+                    local[key] = tidal_id
                     added += 1
             if added > 0:
                 save_json(MAPPINGS_FILE, local)
-                logger.info(f"Synced {added} new community corrections")
+                logger.info(f"Community sync: fetched {added} new correction(s) from GitHub")
             else:
-                logger.info("Community mappings up to date")
+                logger.info(f"Community sync: up to date ({len(community)} mappings on server, {len(local)} local)")
+        elif resp.status_code == 404:
+            logger.info("Community sync: no community mappings file on GitHub yet")
         else:
-            logger.debug(f"Community mappings fetch returned {resp.status_code}")
+            logger.warning(f"Community sync: GitHub returned HTTP {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Could not sync community mappings: {e}")
+        logger.warning(f"Community sync failed: {e}")
 
-def submit_correction(sp_id, tidal_id):
+def submit_correction(key, tidal_id):
     """Submit a track correction to the community worker."""
     try:
         data = {
-            "old_value": sp_id,
+            "old_value": key,
             "correct_value": str(tidal_id),
             "app_version": APP_VERSION
         }
+        logger.info(f"Submitting correction to community server ({key} -> Tidal:{tidal_id})...")
         resp = requests.post(WORKER_URL, json=data, timeout=10)
         if resp.status_code == 200:
-            logger.info("Correction shared with community")
+            logger.info("Community: correction submitted successfully")
         else:
-            logger.warning(f"Failed to share correction: {resp.status_code}")
+            logger.warning(f"Community: server returned HTTP {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Could not submit correction: {e}")
+        logger.warning(f"Community: could not submit correction - {e}")
 
 # --- WINDOWS AUDIO MUTING (PYCAW) ---
 def mute_spotify_windows():
@@ -277,42 +306,388 @@ def mute_spotify_windows():
     if not PYCAW_AVAILABLE:
         return False
     try:
-        sessions = AudioUtilities.GetAllSessions()
-        for session in sessions:
-            if session.Process and session.Process.name().lower() == "spotify.exe":
-                volume = session._ctl.QueryInterface(ISimpleAudioVolume)
-                volume.SetMute(1, None)
-                return True
+        comtypes.CoInitialize()
+        try:
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                if session.Process and session.Process.name().lower() == "spotify.exe":
+                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    volume.SetMute(1, None)
+                    return True
+        finally:
+            comtypes.CoUninitialize()
     except Exception as e:
         logger.debug(f"pycaw mute error: {e}")
     return False
+
+# --- MEDIA INFO & DETECTION ---
+
+# Apps whose media sessions we ignore (our own playback)
+IGNORED_APPS = {'vlc', 'vlc media player', 'tidal', 'spotifytidalsync'}
+
+class MediaInfo:
+    """Holds detected media information from OS-level media detection."""
+    def __init__(self, title="", artist="", album="", playback_status="unknown",
+                 source_app="", image_url=None):
+        self.title = title or ""
+        self.artist = artist or ""
+        self.album = album or ""
+        self.playback_status = playback_status  # "playing", "paused", "stopped", "unknown"
+        self.source_app = source_app
+        self.image_url = image_url
+
+    @property
+    def mapping_key(self):
+        return make_mapping_key(self.title, self.artist)
+
+    @property
+    def is_playing(self):
+        return self.playback_status == "playing"
+
+    def matches(self, other):
+        """Check if this represents the same track as another MediaInfo."""
+        if other is None:
+            return False
+        return self.mapping_key == other.mapping_key
+
+    def __repr__(self):
+        return f"MediaInfo('{self.title}' by '{self.artist}' [{self.source_app}] {self.playback_status})"
+
+
+class MediaDetector:
+    """Detects currently playing media via OS-level APIs (SMTC on Windows, MPRIS on Linux)."""
+
+    def __init__(self):
+        self._last_error_time = 0
+        self._error_throttle = 30  # seconds between repeated error logs
+        self._loop = None
+        self._loop_thread = None
+        if SMTC_AVAILABLE:
+            self._start_event_loop()
+
+    def _start_event_loop(self):
+        """Start a dedicated asyncio event loop for SMTC calls."""
+        def _run_loop():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_forever()
+
+        self._loop_thread = threading.Thread(target=_run_loop, daemon=True)
+        self._loop_thread.start()
+        # Give the loop a moment to start
+        time.sleep(0.1)
+
+    def _run_async(self, coro):
+        """Run an async coroutine on our dedicated event loop."""
+        if self._loop is None:
+            return None
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout=3.0)
+        except Exception:
+            return None
+
+    def get_current_media(self, preferred_source="spotify"):
+        """Get currently playing media from OS. Returns MediaInfo or None."""
+        if platform.system() == "Windows" and SMTC_AVAILABLE:
+            return self._get_windows_media(preferred_source)
+        elif platform.system() == "Linux" and DBUS_AVAILABLE:
+            return self._get_linux_media(preferred_source)
+        else:
+            self._log_error_throttled("No media detection available (install winsdk on Windows or dbus-python on Linux)")
+            return None
+
+    def _get_windows_media(self, preferred_source):
+        """Get media info via Windows SMTC."""
+        try:
+            return self._run_async(self._async_get_windows_media(preferred_source))
+        except Exception as e:
+            self._log_error_throttled(f"SMTC error: {e}")
+            return None
+
+    async def _async_get_windows_media(self, preferred_source):
+        """Async implementation of Windows SMTC media detection."""
+        try:
+            manager = await SessionManager.request_async()
+            sessions = manager.get_sessions()
+
+            if not sessions:
+                return None
+
+            best_session = None
+            preferred_session = None
+
+            for session in sessions:
+                app_id = self._identify_app(session.source_app_user_model_id)
+                if app_id.lower() in IGNORED_APPS:
+                    continue
+
+                info = session.get_playback_info()
+                if info is None:
+                    continue
+
+                status = info.playback_status
+
+                if app_id.lower() == preferred_source.lower():
+                    preferred_session = session
+                    break
+                elif status == PlaybackStatus.PLAYING and best_session is None:
+                    best_session = session
+
+            session = preferred_session or best_session
+            if session is None:
+                # Fall back to first non-ignored session
+                for s in sessions:
+                    app_id = self._identify_app(s.source_app_user_model_id)
+                    if app_id.lower() not in IGNORED_APPS:
+                        session = s
+                        break
+
+            if session is None:
+                return None
+
+            media_props = await session.try_get_media_properties_async()
+            info = session.get_playback_info()
+            app_id = self._identify_app(session.source_app_user_model_id)
+
+            status_str = "unknown"
+            if info:
+                status_map = {
+                    PlaybackStatus.PLAYING: "playing",
+                    PlaybackStatus.PAUSED: "paused",
+                    PlaybackStatus.STOPPED: "stopped",
+                    PlaybackStatus.CLOSED: "stopped",
+                }
+                status_str = status_map.get(info.playback_status, "unknown")
+
+            title = media_props.title or ""
+            artist = media_props.artist or ""
+            album = media_props.album_title or ""
+
+            if not title:
+                return None
+
+            return MediaInfo(
+                title=title,
+                artist=artist,
+                album=album,
+                playback_status=status_str,
+                source_app=app_id,
+            )
+        except Exception as e:
+            self._log_error_throttled(f"SMTC async error: {e}")
+            return None
+
+    def _get_linux_media(self, preferred_source):
+        """Get media info via Linux D-Bus MPRIS."""
+        try:
+            bus = dbus.SessionBus()
+            services = [s for s in bus.list_names() if s.startswith('org.mpris.MediaPlayer2.')]
+
+            if not services:
+                return None
+
+            best_service = None
+            preferred_service = None
+
+            for service_name in services:
+                app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
+                if app_name in IGNORED_APPS:
+                    continue
+
+                if app_name == preferred_source.lower():
+                    preferred_service = service_name
+                    break
+
+                # Check if playing
+                try:
+                    proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
+                    props = dbus.Interface(proxy, 'org.freedesktop.DBus.Properties')
+                    status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
+                    if status == 'Playing' and best_service is None:
+                        best_service = service_name
+                except:
+                    continue
+
+            service_name = preferred_service or best_service
+            if service_name is None:
+                # Fall back to first non-ignored
+                for s in services:
+                    app_name = s.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
+                    if app_name not in IGNORED_APPS:
+                        service_name = s
+                        break
+
+            if service_name is None:
+                return None
+
+            proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
+            props = dbus.Interface(proxy, 'org.freedesktop.DBus.Properties')
+
+            metadata = props.Get('org.mpris.MediaPlayer2.Player', 'Metadata')
+            status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
+
+            title = str(metadata.get('xesam:title', ''))
+            artists = metadata.get('xesam:artist', [])
+            artist = str(artists[0]) if artists else ''
+            album = str(metadata.get('xesam:album', ''))
+
+            app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0]
+
+            status_map = {'Playing': 'playing', 'Paused': 'paused', 'Stopped': 'stopped'}
+            status_str = status_map.get(status, 'unknown')
+
+            if not title:
+                return None
+
+            return MediaInfo(
+                title=title,
+                artist=artist,
+                album=album,
+                playback_status=status_str,
+                source_app=app_name,
+            )
+        except Exception as e:
+            self._log_error_throttled(f"MPRIS error: {e}")
+            return None
+
+    def send_control(self, command):
+        """Send media control command via OS media controls.
+        Commands: 'play', 'pause', 'play_pause', 'next', 'previous'"""
+        if platform.system() == "Windows" and SMTC_AVAILABLE:
+            self._run_async(self._async_send_control(command))
+        elif platform.system() == "Linux" and DBUS_AVAILABLE:
+            self._send_linux_control(command)
+
+    async def _async_send_control(self, command):
+        """Send control via SMTC."""
+        try:
+            manager = await SessionManager.request_async()
+            session = manager.get_current_session()
+            if session is None:
+                return
+            cmd_map = {
+                'play': session.try_play_async,
+                'pause': session.try_pause_async,
+                'play_pause': session.try_toggle_play_pause_async,
+                'next': session.try_skip_next_async,
+                'previous': session.try_skip_previous_async,
+            }
+            func = cmd_map.get(command)
+            if func:
+                await func()
+        except Exception as e:
+            logger.debug(f"SMTC control error: {e}")
+
+    def _send_linux_control(self, command):
+        """Send control via MPRIS."""
+        try:
+            bus = dbus.SessionBus()
+            services = [s for s in bus.list_names() if s.startswith('org.mpris.MediaPlayer2.')]
+            for service_name in services:
+                app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
+                if app_name in IGNORED_APPS:
+                    continue
+                proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
+                player = dbus.Interface(proxy, 'org.mpris.MediaPlayer2.Player')
+                cmd_map = {
+                    'play': player.Play,
+                    'pause': player.Pause,
+                    'play_pause': player.PlayPause,
+                    'next': player.Next,
+                    'previous': player.Previous,
+                }
+                func = cmd_map.get(command)
+                if func:
+                    func()
+                break  # Only control first non-ignored player
+        except Exception as e:
+            logger.debug(f"MPRIS control error: {e}")
+
+    def _identify_app(self, raw_id):
+        """Map OS app IDs to known friendly names."""
+        if not raw_id:
+            return "unknown"
+        raw_lower = raw_id.lower()
+        known = {
+            'spotify': 'Spotify',
+            'tidal': 'Tidal',
+            'vlc': 'VLC',
+            'firefox': 'Firefox',
+            'chrome': 'Chrome',
+            'msedge': 'Edge',
+            'musicbee': 'MusicBee',
+            'foobar': 'foobar2000',
+            'winamp': 'Winamp',
+            'itunes': 'iTunes',
+            'apple music': 'Apple Music',
+        }
+        for key, name in known.items():
+            if key in raw_lower:
+                return name
+        # Return cleaned raw ID
+        return raw_id.split('.')[-1].split('!')[-1] or raw_id
+
+    def _log_error_throttled(self, msg):
+        """Log an error at most once per throttle period."""
+        now = time.time()
+        if now - self._last_error_time > self._error_throttle:
+            logger.warning(msg)
+            self._last_error_time = now
+
+
+def fetch_album_art_url(title, artist, album=""):
+    """Fetch album art URL from iTunes Search API (free, no auth required)."""
+    try:
+        query = f"{title} {artist}".strip()
+        if not query:
+            return None
+        resp = requests.get(
+            "https://itunes.apple.com/search",
+            params={"term": query, "media": "music", "entity": "song", "limit": 3},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            results = resp.json().get('results', [])
+            if results:
+                # Get highest resolution art (replace 100x100 with 600x600)
+                art_url = results[0].get('artworkUrl100', '')
+                if art_url:
+                    return art_url.replace('100x100bb', '600x600bb')
+    except Exception:
+        pass
+    return None
+
 
 # --- PREFETCH CACHE ---
 class PrefetchCache:
     """Pre-fetches upcoming Tidal tracks from the Spotify queue to reduce latency on track changes."""
 
     def __init__(self):
-        self._cache = {}  # spotify_id -> tidal_track
+        self._cache = {}  # key -> tidal_track (key = mapping_key or spotify_id)
         self._lock = threading.Lock()
         self._prefetching = False
 
-    def get(self, sp_id):
+    def get(self, key):
         with self._lock:
-            return self._cache.get(sp_id)
+            return self._cache.get(key)
 
-    def put(self, sp_id, tidal_track):
+    def put(self, key, tidal_track):
         with self._lock:
-            self._cache[sp_id] = tidal_track
+            self._cache[key] = tidal_track
 
-    def has(self, sp_id):
+    def has(self, key):
         with self._lock:
-            return sp_id in self._cache
+            return key in self._cache
 
-    def clear_old(self, keep_ids):
+    def clear_old(self, keep_keys):
         with self._lock:
-            self._cache = {k: v for k, v in self._cache.items() if k in keep_ids}
+            self._cache = {k: v for k, v in self._cache.items() if k in keep_keys}
 
-    def start_prefetch(self, sp_client, search_func, current_track_id):
+    def start_prefetch(self, sp_client, search_func, current_key):
+        """Start prefetching. Returns immediately if sp_client is None (no Spotify API)."""
+        if sp_client is None:
+            return
         if self._prefetching:
             return
 
@@ -322,18 +697,26 @@ class PrefetchCache:
                 queue_data = sp_client.queue()
                 upcoming = queue_data.get('queue', [])[:5]
 
-                keep_ids = {current_track_id}
+                keep_keys = {current_key}
                 for track in upcoming:
-                    keep_ids.add(track['id'])
+                    key = make_mapping_key(track['name'], track['artists'][0]['name'])
+                    keep_keys.add(key)
+                    keep_keys.add(track['id'])
 
-                self.clear_old(keep_ids)
+                self.clear_old(keep_keys)
 
                 for i, track in enumerate(upcoming):
-                    sp_id = track['id']
-                    if not self.has(sp_id):
-                        tidal_match = search_func(track)
+                    key = make_mapping_key(track['name'], track['artists'][0]['name'])
+                    if not self.has(key) and not self.has(track['id']):
+                        tidal_match = search_func(
+                            title=track['name'],
+                            artist=track['artists'][0]['name'],
+                            duration_ms=track.get('duration_ms', 0),
+                            spotify_id=track['id']
+                        )
                         if tidal_match:
-                            self.put(sp_id, tidal_match)
+                            self.put(key, tidal_match)
+                            self.put(track['id'], tidal_match)
                             logger.info(f"Prefetched: {track['name']}")
                         else:
                             logger.debug(f"Prefetch: no match for '{track['name']}'")
@@ -411,19 +794,23 @@ class AudioPlayer:
 # --- SYNC MANAGER ---
 class SyncManager:
     def __init__(self, gui_callback=None, request_manual_match_callback=None):
-        self.sp = None
+        self.sp = None  # Spotify API client (optional)
         self.tidal = None
         self.player = AudioPlayer()
         self.gui_callback = gui_callback
         self.request_manual_match = request_manual_match_callback
         self.running = True
 
-        self.current_spotify_track = None
+        self.current_media = None  # MediaInfo from OS detection
         self.current_tidal_track = None
         self.status = "Initializing..."
         self.is_paused_waiting = False
         self.current_image_url = None
         self.user_skip_pending = False
+        self.spotify_api_available = False
+
+        self.media_detector = MediaDetector()
+        self._art_cache = {}  # mapping_key -> art_url
 
         self.prefetch_cache = PrefetchCache()
 
@@ -435,24 +822,51 @@ class SyncManager:
         self.share_corrections = settings.get("share_corrections", False)
 
     def login(self):
-        # Spotify
-        if not SPOTIFY_CLIENT_ID:
-            self.status = "Missing Credentials"
+        """Login to Tidal (required) and optionally Spotify API."""
+        if not self.login_tidal():
             return False
-        try:
-            cache_handler = KeyringCacheHandler("spotify_token")
+        settings = load_settings()
+        if settings.get("use_spotify_api", False):
+            self.login_spotify()
+        else:
+            logger.info("Spotify API: disabled (using OS media detection)")
+            logger.info("  -> Enable in Settings > Spotify API for queue prefetch & seek sync")
+        return True
 
-            auth_manager = SpotifyOAuth(client_id=SPOTIFY_CLIENT_ID, client_secret=SPOTIFY_CLIENT_SECRET,
-                                        redirect_uri=SPOTIFY_REDIRECT_URI, scope="user-read-playback-state user-modify-playback-state user-read-currently-playing",
-                                        cache_handler=cache_handler)
+    def login_spotify(self):
+        """Optional Spotify API login. Sets self.sp if credentials are available."""
+        if not SPOTIPY_AVAILABLE:
+            logger.info("Spotify API: spotipy not installed (OS media detection will be used)")
+            return
+
+        client_id, client_secret = get_credentials()
+        if not client_id or not client_secret:
+            logger.info("Spotify API: no credentials configured (OS media detection will be used)")
+            logger.info("  -> Enter credentials in Settings > Spotify API for queue prefetch & seek sync")
+            return
+
+        try:
+            redirect_uri = 'http://127.0.0.1:8888/callback'
+            cache_handler = KeyringCacheHandler("spotify_token")
+            auth_manager = SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+                scope="user-read-playback-state user-modify-playback-state user-read-currently-playing",
+                cache_handler=cache_handler
+            )
             self.sp = spotipy.Spotify(auth_manager=auth_manager)
             user = self.sp.current_user()
-            logger.info(f"Spotify: Logged in as {user['display_name']}")
+            self.spotify_api_available = True
+            logger.info(f"Spotify API: logged in as {user['display_name']} (prefetch & seek sync enabled)")
         except Exception as e:
-            logger.error(f"Spotify Login Failed: {e}")
-            return False
+            logger.warning(f"Spotify API login failed: {e}")
+            logger.info("  -> Continuing with OS media detection only")
+            self.sp = None
+            self.spotify_api_available = False
 
-        # Tidal
+    def login_tidal(self):
+        """Required Tidal login."""
         try:
             if not PREFERRED_QUALITY: return False
             config = tidalapi.Config(quality=PREFERRED_QUALITY)
@@ -522,36 +936,64 @@ class SyncManager:
         try: return self.tidal.track(tidal_id)
         except: return None
 
-    def search_tidal_match(self, sp_track):
-        # 1. Check Mappings
+    def search_tidal_match(self, title, artist, duration_ms=0, spotify_id=None):
+        """Search for a Tidal match. Decoupled from Spotify track dict."""
         mappings = load_mappings()
-        sp_id = sp_track['id']
-        if sp_id in mappings:
-            t_track = self.get_tidal_track_by_id(mappings[sp_id])
+
+        # 1. Check normalized key mapping
+        norm_key = make_mapping_key(title, artist)
+        if norm_key in mappings:
+            t_track = self.get_tidal_track_by_id(mappings[norm_key])
             if t_track:
-                logger.info(f"Found manual mapping for '{sp_track['name']}'")
+                logger.info(f"Found mapping (normalized) for '{title}'")
                 return t_track
 
-        # 2. Search
-        track_name = sp_track['name']
-        artist_name = sp_track['artists'][0]['name']
-        duration_ms = sp_track['duration_ms']
+        # 2. Check Spotify ID mapping (backward compat)
+        if spotify_id and spotify_id in mappings:
+            t_track = self.get_tidal_track_by_id(mappings[spotify_id])
+            if t_track:
+                logger.info(f"Found mapping (Spotify ID) for '{title}'")
+                return t_track
 
+        # 3. Search Tidal
         try:
-            clean_name = track_name.split('(')[0].split('-')[0].strip()
-            query = f"{clean_name} {artist_name}"
+            clean_name = title.split('(')[0].split('-')[0].strip()
+            query = f"{clean_name} {artist}"
             logger.info(f"Searching Tidal: '{query}'")
             search = self.tidal.search(query, models=[tidalapi.media.Track], limit=10)
 
             best_match = None
             for t in search['tracks']:
-                if abs((t.duration * 1000) - duration_ms) <= 5000:
-                    best_match = t
-                    break
+                if duration_ms > 0:
+                    # Duration-based matching when we have duration info
+                    if abs((t.duration * 1000) - duration_ms) <= 5000:
+                        best_match = t
+                        break
+                else:
+                    # Name-based matching when no duration (OS detection)
+                    t_name = normalize_text(t.name)
+                    t_artist = normalize_text(t.artist.name)
+                    s_name = normalize_text(title)
+                    s_artist = normalize_text(artist)
+                    if t_name == s_name and t_artist == s_artist:
+                        best_match = t
+                        break
+                    # Partial match: title contains and artist matches
+                    if s_name in t_name and t_artist == s_artist:
+                        best_match = t
+                        break
+
+            # Fallback: if no exact match, take first result with matching artist
+            if not best_match:
+                s_artist = normalize_text(artist)
+                for t in search['tracks']:
+                    if normalize_text(t.artist.name) == s_artist:
+                        best_match = t
+                        break
 
             if best_match: return best_match
 
-            logger.warning(f"No exact match found for '{track_name}'. Waiting for user.")
+            logger.warning(f"No match found for '{title}'. Waiting for user.")
             return None
 
         except Exception as e:
@@ -566,7 +1008,7 @@ class SyncManager:
                 return False
         return True
 
-    def attempt_play_tidal(self, tidal_track, sp_is_playing):
+    def attempt_play_tidal(self, tidal_track, source_is_playing):
         if not self.check_and_refresh_session():
              self.status = "Session Expired"
              return False
@@ -606,16 +1048,24 @@ class SyncManager:
             self.player.play_url(url)
             time.sleep(0.5)
 
-            if not sp_is_playing: self.sp.start_playback(); self.sp.seek_track(0)
-            else: self.sp.seek_track(0)
+            # If Spotify API available, sync playback position
+            if self.sp:
+                try:
+                    if not source_is_playing:
+                        self.sp.start_playback()
+                        self.sp.seek_track(0)
+                    else:
+                        self.sp.seek_track(0)
+                except Exception as e:
+                    logger.debug(f"Spotify seek sync: {e}")
 
             self.status = f"Playing: {tidal_track.name} [{used_quality}]"
             logger.info(f"Playing Tidal: {tidal_track.name} [{used_quality}]")
 
-            # Start prefetching next tracks after successfully playing
+            # Start prefetching next tracks (only if Spotify API available)
+            current_key = self.current_media.mapping_key if self.current_media else ""
             self.prefetch_cache.start_prefetch(
-                self.sp, self.search_tidal_match,
-                self.current_spotify_track['id'] if self.current_spotify_track else ""
+                self.sp, self.search_tidal_match, current_key
             )
 
             return True
@@ -624,37 +1074,73 @@ class SyncManager:
             self.player.stop()
             return False
 
-    def _mute_spotify(self, sp_playback):
-        """Mute Spotify using pycaw (Windows) or API volume fallback."""
-        # Try pycaw first for better per-app muting
+    def _mute_spotify(self):
+        """Mute Spotify using pycaw (Windows only)."""
         if mute_spotify_windows():
             return
-        # Fallback: API volume control
-        try:
-            if sp_playback.get('device', {}).get('volume_percent') != 0: self.sp.volume(0)
-        except: pass
 
-    def _handle_new_track(self, sp_track, sp_is_playing):
+    def _handle_new_track(self, media_info):
         """Handle switching to a new track."""
-        logger.info(f"Spotify Changed: {sp_track['name']}")
-        self.current_spotify_track = sp_track
+        logger.info(f"Track Changed: {media_info.title} by {media_info.artist} [{media_info.source_app}]")
+        self.current_media = media_info
         self.waiting_for_user_selection = False
         self.current_song_favorited = False
         self.is_paused_waiting = False
         self.user_skip_pending = False
 
-        # Check prefetch cache first
-        sp_id = sp_track['id']
-        tidal_track = self.prefetch_cache.get(sp_id)
+        # Get album art
+        art_key = media_info.mapping_key
+        if art_key in self._art_cache:
+            self.current_image_url = self._art_cache[art_key]
+        else:
+            # Fetch in background
+            def _fetch_art():
+                url = fetch_album_art_url(media_info.title, media_info.artist, media_info.album)
+                self._art_cache[art_key] = url
+                self.current_image_url = url
+            threading.Thread(target=_fetch_art, daemon=True).start()
+
+        # Check prefetch cache (by normalized key and spotify ID if available)
+        norm_key = media_info.mapping_key
+        tidal_track = self.prefetch_cache.get(norm_key)
+
+        if not tidal_track:
+            # Try to get spotify ID for cache lookup if API available
+            if self.sp:
+                try:
+                    sp_playback = self.sp.current_playback()
+                    if sp_playback and sp_playback.get('item'):
+                        sp_id = sp_playback['item']['id']
+                        tidal_track = self.prefetch_cache.get(sp_id)
+                except:
+                    pass
+
         if tidal_track:
             logger.info(f"Using prefetched match: {tidal_track.name}")
         else:
-            tidal_track = self.search_tidal_match(sp_track)
+            # Get duration from Spotify API if available for better matching
+            duration_ms = 0
+            spotify_id = None
+            if self.sp:
+                try:
+                    sp_playback = self.sp.current_playback()
+                    if sp_playback and sp_playback.get('item'):
+                        duration_ms = sp_playback['item'].get('duration_ms', 0)
+                        spotify_id = sp_playback['item']['id']
+                except:
+                    pass
+
+            tidal_track = self.search_tidal_match(
+                title=media_info.title,
+                artist=media_info.artist,
+                duration_ms=duration_ms,
+                spotify_id=spotify_id
+            )
 
         if tidal_track:
             self.current_tidal_track = tidal_track
             self.status = f"Loading: {tidal_track.name}..."
-            if not self.attempt_play_tidal(tidal_track, sp_is_playing):
+            if not self.attempt_play_tidal(tidal_track, media_info.is_playing):
                 self.status = "Playback Error - Stopped"
         else:
             self.status = "Match Not Found - Waiting for User"
@@ -662,7 +1148,7 @@ class SyncManager:
             self.current_tidal_track = None
             self.waiting_for_user_selection = True
             if self.request_manual_match:
-                self.request_manual_match(sp_track)
+                self.request_manual_match(media_info)
 
     def shutdown(self):
         self.running = False
@@ -677,24 +1163,16 @@ class SyncManager:
             pass
 
     def sync_logic(self):
-        try: sp_playback = self.sp.current_playback()
-        except: self.status = "Spotify Error"; return
+        # Get current media from OS detection
+        media_info = self.media_detector.get_current_media("spotify")
 
-        if not sp_playback or not sp_playback.get('item'):
-            self.status = "Spotify Idle"
+        if media_info is None or not media_info.title:
+            self.status = "Waiting for media..."
             return
-
-        sp_track = sp_playback['item']
-        sp_id = sp_track['id']
-        sp_is_playing = sp_playback['is_playing']
 
         # Mute Spotify
         if self.mute_spotify:
-            self._mute_spotify(sp_playback)
-
-        # Get Art
-        try: self.current_image_url = sp_track['album']['images'][0]['url']
-        except: self.current_image_url = None
+            self._mute_spotify()
 
         # VLC state
         vlc_time = self.player.get_time()
@@ -704,54 +1182,60 @@ class SyncManager:
         vlc_time_left = (vlc_duration - vlc_time) if vlc_has_track else 0
 
         # --- VLC Finished: Advance to next track ---
-        # This is the primary trigger for track advancement (local playback based)
         if (self.current_tidal_track and vlc_has_track and not vlc_is_playing
                 and vlc_time > 1000 and vlc_time_left < 1500):
             logger.info("Local playback finished - advancing to next track")
             self.is_paused_waiting = False
-            try:
-                self.sp.next_track()
-            except: pass
+            # Advance source player
+            if self.sp:
+                try:
+                    self.sp.next_track()
+                except: pass
+            else:
+                self.media_detector.send_control('next')
             # Reset to force re-detection next cycle
-            self.current_spotify_track = None
+            self.current_media = None
             self.current_tidal_track = None
             return
 
         # --- Track Change Detection ---
-        if self.current_spotify_track is None or sp_id != self.current_spotify_track['id']:
+        if self.current_media is None or not media_info.matches(self.current_media):
 
             if self.user_skip_pending:
                 # User used our skip controls - honor immediately
-                self._handle_new_track(sp_track, sp_is_playing)
+                self._handle_new_track(media_info)
                 return
 
             if vlc_is_playing and vlc_time_left > 15000:
-                # VLC has lots of time left - likely a user skip in Spotify app
-                logger.info(f"External skip detected: {sp_track['name']}")
-                self._handle_new_track(sp_track, sp_is_playing)
+                # VLC has lots of time left - likely a user skip in source app
+                logger.info(f"External skip detected: {media_info.title}")
+                self._handle_new_track(media_info)
                 return
 
             if vlc_is_playing and vlc_time_left > 2000:
-                # VLC still playing with moderate time left - Spotify auto-advanced
+                # VLC still playing with moderate time left - source auto-advanced
                 # Wait for local playback to finish
                 if not self.is_paused_waiting:
-                    try:
-                        self.sp.pause_playback()
-                    except: pass
+                    if self.sp:
+                        try:
+                            self.sp.pause_playback()
+                        except: pass
+                    else:
+                        self.media_detector.send_control('pause')
                     self.is_paused_waiting = True
-                    logger.info("Pausing Spotify - waiting for local playback to finish")
+                    logger.info("Pausing source - waiting for local playback to finish")
                 return
 
             # VLC is done or nearly done - safe to switch
-            self._handle_new_track(sp_track, sp_is_playing)
+            self._handle_new_track(media_info)
             return
 
         # --- Playback Monitor (same track) ---
         if self.current_tidal_track and not self.waiting_for_user_selection:
             # Pause/Resume Sync
-            if not sp_is_playing and vlc_is_playing:
+            if not media_info.is_playing and vlc_is_playing:
                 self.player.pause()
-            elif sp_is_playing and not vlc_is_playing and not self.is_paused_waiting:
+            elif media_info.is_playing and not vlc_is_playing and not self.is_paused_waiting:
                 if vlc_has_track and vlc_time < vlc_duration - 500:
                     self.player.resume()
 
@@ -764,7 +1248,6 @@ class SyncManager:
                         logger.info("Auto-Favorited Track")
                     except:
                         try:
-                            # Fallback for older tidalapi versions
                             self.tidal.add_favorite(self.current_tidal_track.id)
                             self.current_song_favorited = True
                             logger.info("Auto-Favorited Track")
@@ -788,58 +1271,80 @@ class SyncManager:
         if self.waiting_for_user_selection: t_name = "(Selection Needed)"
         vlc_time = max(0, self.player.get_time())
         vlc_duration = max(0, self.player.get_duration())
+        source_track = ""
+        source_app = ""
+        if self.current_media:
+            source_track = f"{self.current_media.title} - {self.current_media.artist}"
+            source_app = self.current_media.source_app
         return {
             'status': self.status,
             'tidal_track': t_name,
             'vlc_time': vlc_time,
             'vlc_duration': vlc_duration,
-            'image_url': self.current_image_url
+            'image_url': self.current_image_url,
+            'source_track': source_track,
+            'source_app': source_app,
+            'spotify_api': self.spotify_api_available,
         }
 
     # --- Playback Commands ---
     def manual_map_track(self, tidal_track):
-        if self.current_spotify_track:
-            save_mapping(self.current_spotify_track['id'], tidal_track.id)
+        if self.current_media:
+            key = self.current_media.mapping_key
+            save_mapping(key, tidal_track.id)
             # Share with community if opted in
             if self.share_corrections:
                 threading.Thread(
                     target=submit_correction,
-                    args=(self.current_spotify_track['id'], tidal_track.id),
+                    args=(key, tidal_track.id),
                     daemon=True
                 ).start()
             self.current_tidal_track = tidal_track
             self.waiting_for_user_selection = False
             self.status = f"Mapped: {tidal_track.name}"
-            try: sp_playing = self.sp.current_playback()['is_playing']
-            except: sp_playing = True
 
-            if not self.attempt_play_tidal(tidal_track, sp_playing):
+            source_playing = self.current_media.is_playing if self.current_media else True
+            if not self.attempt_play_tidal(tidal_track, source_playing):
                  messagebox.showerror("Playback Error", "Could not stream this track.\nIt might be region-locked or unavailable on your plan.")
 
     def toggle_play(self):
-        try:
-            if self.sp.current_playback()['is_playing']: self.sp.pause_playback()
-            else: self.sp.start_playback()
-        except: pass
+        if self.sp:
+            try:
+                if self.sp.current_playback()['is_playing']:
+                    self.sp.pause_playback()
+                else:
+                    self.sp.start_playback()
+                return
+            except: pass
+        self.media_detector.send_control('play_pause')
 
     def next_track(self):
         self.user_skip_pending = True
         self.player.stop()
-        try: self.sp.next_track()
-        except: pass
+        if self.sp:
+            try:
+                self.sp.next_track()
+                return
+            except: pass
+        self.media_detector.send_control('next')
 
     def prev_track(self):
         self.user_skip_pending = True
         self.player.stop()
-        try: self.sp.previous_track()
-        except: pass
+        if self.sp:
+            try:
+                self.sp.previous_track()
+                return
+            except: pass
+        self.media_detector.send_control('previous')
 
     def seek_to(self, position_ms):
-        """Seek VLC and Spotify to a specific position."""
+        """Seek VLC and optionally Spotify to a specific position."""
         self.player.set_position(position_ms)
-        try:
-            self.sp.seek_track(int(position_ms))
-        except: pass
+        if self.sp:
+            try:
+                self.sp.seek_track(int(position_ms))
+            except: pass
 
     def skip_forward_10(self):
         """Skip forward 10 seconds."""
@@ -853,6 +1358,22 @@ class SyncManager:
 
 # --- GUI CLASSES ---
 
+def apply_dark_title_bar(window):
+    """Apply dark title bar on Windows 10/11 using DWM API."""
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+            ctypes.byref(value), ctypes.sizeof(value)
+        )
+    except Exception:
+        pass
+
 class ModernToplevel(tk.Toplevel):
     def __init__(self, parent, title, geometry):
         super().__init__(parent)
@@ -860,12 +1381,24 @@ class ModernToplevel(tk.Toplevel):
         self.geometry(geometry)
         self.configure(bg="#1e1e1e")
         self.iconbitmap(default='')
+        self.update_idletasks()
+        apply_dark_title_bar(self)
 
 class ManualSelectWindow(ModernToplevel):
-    def __init__(self, parent, manager, sp_track):
+    def __init__(self, parent, manager, media_info):
         super().__init__(parent, "Fix Incorrect Match", "700x500")
         self.manager = manager
-        self.sp_track = sp_track
+        self.media_info = media_info
+
+        # Accept both MediaInfo objects and legacy sp_track dicts
+        if isinstance(media_info, MediaInfo):
+            self.track_title = media_info.title
+            self.track_artist = media_info.artist
+        else:
+            # Legacy dict format (backward compat)
+            self.track_title = media_info.get('name', media_info.get('title', ''))
+            artists = media_info.get('artists', [])
+            self.track_artist = artists[0]['name'] if artists else media_info.get('artist', '')
 
         style = ttk.Style()
         style.theme_use('clam')
@@ -882,15 +1415,15 @@ class ManualSelectWindow(ModernToplevel):
         header = tk.Frame(self, bg="#1e1e1e")
         header.pack(fill='x', padx=20, pady=20)
 
-        tk.Label(header, text=f"Fixing Match For: {sp_track['name']}", bg="#1e1e1e", fg="white", font=("Segoe UI", 12, "bold")).pack(anchor='w')
-        tk.Label(header, text=f"Artist: {sp_track['artists'][0]['name']}", bg="#1e1e1e", fg="#bbbbbb", font=("Segoe UI", 10)).pack(anchor='w')
+        tk.Label(header, text=f"Fixing Match For: {self.track_title}", bg="#1e1e1e", fg="white", font=("Segoe UI", 12, "bold")).pack(anchor='w')
+        tk.Label(header, text=f"Artist: {self.track_artist}", bg="#1e1e1e", fg="#bbbbbb", font=("Segoe UI", 10)).pack(anchor='w')
 
         search_frame = tk.Frame(self, bg="#1e1e1e")
         search_frame.pack(fill='x', padx=20, pady=5)
 
         self.entry_search = tk.Entry(search_frame, width=40, bg="#333333", fg="white", insertbackground="white", relief="flat", font=("Segoe UI", 10))
         self.entry_search.pack(side='left', padx=(0, 10), ipady=3)
-        self.entry_search.insert(0, f"{sp_track['name']} {sp_track['artists'][0]['name']}")
+        self.entry_search.insert(0, f"{self.track_title} {self.track_artist}")
 
         tk.Button(search_frame, text="Search Tidal", command=self.do_search,
                   bg="#444444", fg="white", relief="flat", padx=10, pady=2).pack(side='left')
@@ -948,7 +1481,7 @@ class ManualSelectWindow(ModernToplevel):
 
 class SettingsWindow(ModernToplevel):
     def __init__(self, parent, manager):
-        super().__init__(parent, "Settings", "700x650")
+        super().__init__(parent, "Settings", "700x700")
         self.manager = manager
 
         style = ttk.Style()
@@ -960,29 +1493,42 @@ class SettingsWindow(ModernToplevel):
 
         tab_gen = tk.Frame(tabs, bg="#1e1e1e")
         tab_audio = tk.Frame(tabs, bg="#1e1e1e")
+        tab_spotify = tk.Frame(tabs, bg="#1e1e1e")
         tab_log = tk.Frame(tabs, bg="#1e1e1e")
         tabs.add(tab_gen, text="General")
         tabs.add(tab_audio, text="Audio Isolation")
+        tabs.add(tab_spotify, text="Spotify API")
         tabs.add(tab_log, text="Logs")
 
         self.build_general(tab_gen)
         self.build_audio_isolation(tab_audio)
+        self.build_spotify_api(tab_spotify)
         self.build_logs(tab_log)
 
     def build_general(self, frame):
         # Audio Device
         tk.Label(frame, text="Audio Output Device:", bg="#1e1e1e", fg="white", font=("Segoe UI", 10)).pack(anchor='w', padx=20, pady=(20,5))
 
-        self.combo_device = ttk.Combobox(frame, state="readonly", width=60)
-        self.combo_device.pack(anchor='w', padx=20, pady=(0, 20))
-        self.combo_device.set("Loading devices...")
-        self.combo_device.bind("<<ComboboxSelected>>", self.on_device)
+        device_frame = tk.Frame(frame, bg="#1e1e1e")
+        device_frame.pack(fill='x', padx=20, pady=(0, 20))
+
+        self.device_listbox = tk.Listbox(device_frame, bg="#2b2b2b", fg="#eeeeee", selectbackground="#444444",
+                                          selectforeground="white", relief="flat", font=("Segoe UI", 9),
+                                          height=4, activestyle='none', exportselection=False)
+        device_scrollbar = tk.Scrollbar(device_frame, orient='vertical', command=self.device_listbox.yview)
+        self.device_listbox.configure(yscrollcommand=device_scrollbar.set)
+
+        self.device_listbox.pack(side='left', fill='both', expand=True)
+        device_scrollbar.pack(side='right', fill='y')
+
+        self.device_listbox.insert(0, "Loading devices...")
+        self.device_listbox.bind("<<ListboxSelect>>", self.on_device)
 
         threading.Thread(target=self.load_devices, daemon=True).start()
 
         # Toggles
         self.mute_var = tk.BooleanVar(value=self.manager.mute_spotify)
-        chk_mute = tk.Checkbutton(frame, text="Mute Spotify Desktop App", variable=self.mute_var,
+        chk_mute = tk.Checkbutton(frame, text="Mute Source App (Spotify/etc)", variable=self.mute_var,
                                   bg="#1e1e1e", fg="white", selectcolor="#1e1e1e", activebackground="#1e1e1e", activeforeground="white",
                                   command=self.save_toggles)
         chk_mute.pack(anchor='w', padx=15, pady=5)
@@ -1012,36 +1558,39 @@ class SettingsWindow(ModernToplevel):
                   bg="#880000", fg="white", relief="flat", padx=10, pady=5).pack(anchor='w', padx=20)
 
     def build_audio_isolation(self, frame):
-        """Tab for setting up Spotify audio isolation (virtual audio device)."""
-        tk.Label(frame, text="Spotify Audio Isolation", bg="#1e1e1e", fg="white",
+        """Tab for setting up audio isolation (virtual audio device)."""
+        max_text_width = 620  # wraplength to keep text inside a 700px window with padding
+
+        tk.Label(frame, text="Audio Isolation", bg="#1e1e1e", fg="white",
                  font=("Segoe UI", 12, "bold")).pack(anchor='w', padx=20, pady=(20, 5))
 
         # Current method info
         if PYCAW_AVAILABLE:
-            method_text = "Active: Spotify is muted at the Windows audio mixer level (pycaw)."
+            method_text = "Active: Source app is muted at the Windows audio mixer level (pycaw)."
             method_color = "#00cc00"
         else:
-            method_text = "Active: Spotify is muted via API volume control."
+            method_text = "Active: pycaw not available. Install for per-app muting on Windows."
             method_color = "#cccc00"
 
         tk.Label(frame, text=method_text, bg="#1e1e1e", fg=method_color,
-                 font=("Segoe UI", 9)).pack(anchor='w', padx=20, pady=(0, 15))
+                 font=("Segoe UI", 9), wraplength=max_text_width, justify='left').pack(anchor='w', padx=20, pady=(0, 15))
 
         # VB-Cable section
         tk.Label(frame, text="Full Audio Isolation (Optional)", bg="#1e1e1e", fg="white",
                  font=("Segoe UI", 10, "bold")).pack(anchor='w', padx=20, pady=(10, 5))
 
         info_text = (
-            "For complete audio isolation, you can route Spotify's output to a\n"
-            "virtual audio device so it produces no sound at all. This requires\n"
+            "For complete audio isolation, you can route your source app's output to a "
+            "virtual audio device so it produces no sound at all. This requires "
             "installing VB-Cable (free virtual audio cable)."
         )
         tk.Label(frame, text=info_text, bg="#1e1e1e", fg="#bbbbbb",
-                 font=("Segoe UI", 9), justify='left').pack(anchor='w', padx=20, pady=(0, 10))
+                 font=("Segoe UI", 9), justify='left', wraplength=max_text_width).pack(anchor='w', padx=20, pady=(0, 10))
 
         # Detect VB-Cable
         self.vbcable_status = tk.Label(frame, text="Checking for virtual audio devices...",
-                                        bg="#1e1e1e", fg="#888888", font=("Segoe UI", 9))
+                                        bg="#1e1e1e", fg="#888888", font=("Segoe UI", 9),
+                                        wraplength=max_text_width, justify='left')
         self.vbcable_status.pack(anchor='w', padx=20, pady=(0, 10))
         threading.Thread(target=self._check_vbcable, daemon=True).start()
 
@@ -1063,12 +1612,12 @@ class SettingsWindow(ModernToplevel):
         steps = (
             "1. Install VB-Cable from the link above\n"
             "2. Open Windows Sound Settings (button above)\n"
-            "3. Under 'App volume and device preferences', find Spotify\n"
-            "4. Set Spotify's Output to 'CABLE Input (VB-Audio Virtual Cable)'\n"
-            "5. Spotify's audio will now go to the virtual device (silence)"
+            "3. Under 'App volume and device preferences', find your source app\n"
+            "4. Set its Output to 'CABLE Input (VB-Audio Virtual Cable)'\n"
+            "5. The source app's audio will now go to the virtual device (silence)"
         )
         tk.Label(frame, text=steps, bg="#1e1e1e", fg="#bbbbbb",
-                 font=("Segoe UI", 9), justify='left').pack(anchor='w', padx=20)
+                 font=("Segoe UI", 9), justify='left', wraplength=max_text_width).pack(anchor='w', padx=20)
 
     def _check_vbcable(self):
         """Check if VB-Cable or similar virtual audio device is installed."""
@@ -1091,6 +1640,140 @@ class SettingsWindow(ModernToplevel):
                     fg="#cc8800")
         self.after(0, _update)
 
+    def build_spotify_api(self, frame):
+        """Tab for optional Spotify API credentials."""
+        max_text_width = 620
+
+        tk.Label(frame, text="Spotify API (Optional)", bg="#1e1e1e", fg="white",
+                 font=("Segoe UI", 12, "bold")).pack(anchor='w', padx=20, pady=(20, 5))
+
+        info_text = (
+            "By default the app detects your current track via OS media controls "
+            "(works with Spotify, Apple Music, YouTube, and any other player).\n\n"
+            "Enable the Spotify API for extra features:\n"
+            "  - Queue prefetch (pre-loads next tracks for faster switching)\n"
+            "  - Precise seek position sync between Spotify and Tidal\n"
+            "  - More reliable track duration matching"
+        )
+        tk.Label(frame, text=info_text, bg="#1e1e1e", fg="#bbbbbb",
+                 font=("Segoe UI", 9), justify='left', wraplength=max_text_width).pack(anchor='w', padx=20, pady=(0, 15))
+
+        # Enable toggle
+        settings = load_settings()
+        self.spotify_api_var = tk.BooleanVar(value=settings.get("use_spotify_api", False))
+        chk_api = tk.Checkbutton(frame, text="Enable Spotify API", variable=self.spotify_api_var,
+                                 bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
+                                 activebackground="#1e1e1e", activeforeground="white",
+                                 font=("Segoe UI", 10, "bold"),
+                                 command=self._toggle_spotify_api)
+        chk_api.pack(anchor='w', padx=15, pady=(0, 10))
+
+        # Status indicator
+        if self.manager.spotify_api_available:
+            status_text = "Status: Connected (API + OS detection)"
+            status_color = "#00cc00"
+        elif settings.get("use_spotify_api", False):
+            status_text = "Status: Enabled but not connected (check credentials, restart app)"
+            status_color = "#cc8800"
+        else:
+            status_text = "Status: OS media detection only"
+            status_color = "#cccc00"
+
+        self.lbl_spotify_status = tk.Label(frame, text=status_text, bg="#1e1e1e", fg=status_color,
+                 font=("Segoe UI", 9, "bold"))
+        self.lbl_spotify_status.pack(anchor='w', padx=20, pady=(0, 15))
+
+        # Credentials frame (shown/hidden based on toggle)
+        self.spotify_creds_frame = tk.Frame(frame, bg="#1e1e1e")
+        self.spotify_creds_frame.pack(fill='x', padx=0, pady=0)
+
+        # Client ID
+        tk.Label(self.spotify_creds_frame, text="Client ID:", bg="#1e1e1e", fg="white",
+                 font=("Segoe UI", 9)).pack(anchor='w', padx=20, pady=(5, 2))
+        self.entry_client_id = tk.Entry(self.spotify_creds_frame, width=50, bg="#333333", fg="white",
+                                         insertbackground="white", relief="flat", font=("Segoe UI", 10))
+        self.entry_client_id.pack(anchor='w', padx=20, ipady=3)
+
+        # Client Secret
+        tk.Label(self.spotify_creds_frame, text="Client Secret:", bg="#1e1e1e", fg="white",
+                 font=("Segoe UI", 9)).pack(anchor='w', padx=20, pady=(10, 2))
+        self.entry_client_secret = tk.Entry(self.spotify_creds_frame, width=50, bg="#333333", fg="white",
+                                             insertbackground="white", relief="flat", font=("Segoe UI", 10), show="*")
+        self.entry_client_secret.pack(anchor='w', padx=20, ipady=3)
+
+        # Pre-fill from keyring
+        try:
+            saved_id = keyring.get_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID") or ""
+            saved_secret = keyring.get_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_SECRET") or ""
+            self.entry_client_id.insert(0, saved_id)
+            self.entry_client_secret.insert(0, saved_secret)
+        except:
+            pass
+
+        # Buttons
+        btn_frame = tk.Frame(self.spotify_creds_frame, bg="#1e1e1e")
+        btn_frame.pack(anchor='w', padx=20, pady=15)
+
+        tk.Button(btn_frame, text="Save Credentials", command=self._save_spotify_creds,
+                  bg="#008800", fg="white", relief="flat", padx=10, pady=5,
+                  font=("Segoe UI", 9, "bold")).pack(side='left', padx=(0, 10))
+
+        tk.Button(btn_frame, text="Clear Credentials", command=self._clear_spotify_creds,
+                  bg="#880000", fg="white", relief="flat", padx=10, pady=5,
+                  font=("Segoe UI", 9)).pack(side='left', padx=(0, 10))
+
+        tk.Button(btn_frame, text="Open Spotify Dashboard",
+                  command=lambda: safe_open_browser("https://developer.spotify.com/dashboard", self),
+                  bg="#333333", fg="white", relief="flat", padx=10, pady=5,
+                  font=("Segoe UI", 9)).pack(side='left')
+
+        tk.Label(self.spotify_creds_frame, text="After saving, restart the app to connect.", bg="#1e1e1e",
+                 fg="#888888", font=("Segoe UI", 8)).pack(anchor='w', padx=20, pady=(5, 0))
+
+        # Show/hide credentials based on current toggle state
+        if not self.spotify_api_var.get():
+            self.spotify_creds_frame.pack_forget()
+
+    def _toggle_spotify_api(self):
+        enabled = self.spotify_api_var.get()
+        save_setting("use_spotify_api", enabled)
+        if enabled:
+            self.spotify_creds_frame.pack(fill='x', padx=0, pady=0)
+            self.lbl_spotify_status.config(text="Enabled - enter credentials below and restart",
+                                            fg="#cc8800")
+        else:
+            self.spotify_creds_frame.pack_forget()
+            self.lbl_spotify_status.config(text="Status: OS media detection only (restart to apply)",
+                                            fg="#cccc00")
+
+    def _save_spotify_creds(self):
+        client_id = self.entry_client_id.get().strip()
+        client_secret = self.entry_client_secret.get().strip()
+        if not client_id or not client_secret:
+            messagebox.showwarning("Missing", "Please enter both Client ID and Client Secret.")
+            return
+        try:
+            keyring.set_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID", client_id)
+            keyring.set_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_SECRET", client_secret)
+            messagebox.showinfo("Saved", "Spotify credentials saved. Restart the app to connect.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save credentials: {e}")
+
+    def _clear_spotify_creds(self):
+        if messagebox.askyesno("Clear", "Remove Spotify API credentials? The app will use OS media detection only."):
+            try:
+                keyring.delete_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_ID")
+            except: pass
+            try:
+                keyring.delete_password(KEYRING_SERVICE, "SPOTIFY_CLIENT_SECRET")
+            except: pass
+            try:
+                keyring.delete_password(KEYRING_SERVICE, "spotify_token")
+            except: pass
+            self.entry_client_id.delete(0, tk.END)
+            self.entry_client_secret.delete(0, tk.END)
+            messagebox.showinfo("Cleared", "Spotify credentials removed. Restart the app.")
+
     def build_logs(self, frame):
         self.log_text = scrolledtext.ScrolledText(frame, bg="#101010", fg="#00ff00", font=("Consolas", 9), state='disabled')
         self.log_text.pack(fill='both', expand=True, padx=5, pady=5)
@@ -1098,27 +1781,34 @@ class SettingsWindow(ModernToplevel):
 
     def load_devices(self):
         self.dev_map = {}
+        self.dev_names = []
         try:
             time.sleep(1)
             devs = self.manager.player.get_audio_devices()
-            names = []
             if devs:
                 for name, did in devs:
                     self.dev_map[name] = did
-                    names.append(name)
+                    self.dev_names.append(name)
             else:
-                names = ["Default / No Devices Found"]
-                self.dev_map[names[0]] = None
+                self.dev_names = ["Default / No Devices Found"]
+                self.dev_map[self.dev_names[0]] = None
 
             def _update():
-                self.combo_device['values'] = names
-                if names: self.combo_device.set(names[0])
+                self.device_listbox.delete(0, tk.END)
+                for name in self.dev_names:
+                    self.device_listbox.insert(tk.END, name)
+                if self.dev_names:
+                    self.device_listbox.selection_set(0)
             self.after(0, _update)
         except Exception as e:
             logger.error(f"Failed to load devices: {e}")
 
     def on_device(self, e):
-        did = self.dev_map.get(self.combo_device.get())
+        sel = self.device_listbox.curselection()
+        if not sel:
+            return
+        name = self.device_listbox.get(sel[0])
+        did = self.dev_map.get(name)
         if did: self.manager.player.set_device(did)
 
     def open_mixer(self):
@@ -1181,8 +1871,10 @@ class MainApp(tk.Tk):
         super().__init__()
         self.manager = manager
         self.title("SpotifyTidalSync")
-        self.geometry("400x780")
+        self.geometry("400x810")
         self.configure(bg="#121212")
+        self.update_idletasks()
+        apply_dark_title_bar(self)
 
         # Set window icon
         try:
@@ -1203,6 +1895,7 @@ class MainApp(tk.Tk):
         style.theme_use('clam')
         style.configure("Main.TLabel", background="#121212", foreground="white", font=("Segoe UI", 10))
         style.configure("Status.TLabel", background="#121212", foreground="#888888", font=("Segoe UI", 9))
+        style.configure("Source.TLabel", background="#121212", foreground="#666666", font=("Segoe UI", 8))
         style.configure("Seek.Horizontal.TScale", background="#121212", troughcolor="#333333")
 
         # Album Art
@@ -1210,13 +1903,17 @@ class MainApp(tk.Tk):
         self.lbl_art.pack(pady=20)
 
         # Track Name
-        self.lbl_track = ttk.Label(self, text="Waiting for Spotify...", font=("Segoe UI", 13, "bold"),
+        self.lbl_track = ttk.Label(self, text="Waiting for media...", font=("Segoe UI", 13, "bold"),
                                    wraplength=380, justify="center", style="Main.TLabel")
         self.lbl_track.pack(pady=(0,5))
 
         # Status
         self.lbl_status = ttk.Label(self, text="Status: Initializing", style="Status.TLabel")
-        self.lbl_status.pack(pady=(0,10))
+        self.lbl_status.pack(pady=(0,3))
+
+        # Source indicator
+        self.lbl_source = ttk.Label(self, text="", style="Source.TLabel")
+        self.lbl_source.pack(pady=(0,10))
 
         # --- Seek Slider ---
         slider_frame = tk.Frame(self, bg="#121212")
@@ -1310,12 +2007,12 @@ class MainApp(tk.Tk):
             pass
         self.after(250, self._update_slider_timer)
 
-    def open_manual_match(self, sp_track=None):
-        track_to_fix = sp_track if sp_track else self.manager.current_spotify_track
-        if not track_to_fix:
-            messagebox.showinfo("Info", "No Spotify track detected to fix.")
+    def open_manual_match(self, media_info=None):
+        info = media_info if media_info else self.manager.current_media
+        if not info:
+            messagebox.showinfo("Info", "No media detected to fix.")
             return
-        ManualSelectWindow(self, self.manager, track_to_fix)
+        ManualSelectWindow(self, self.manager, info)
 
     def open_settings(self):
         SettingsWindow(self, self.manager)
@@ -1326,6 +2023,16 @@ class MainApp(tk.Tk):
     def _update(self, info):
         self.lbl_track.config(text=info['tidal_track'])
         self.lbl_status.config(text=info['status'])
+
+        # Source indicator
+        source_parts = []
+        if info.get('source_app'):
+            source_parts.append(f"Source: {info['source_app']}")
+        if info.get('spotify_api'):
+            source_parts.append("API")
+        else:
+            source_parts.append("OS detection")
+        self.lbl_source.config(text=" | ".join(source_parts))
 
         url = info.get('image_url')
         if url != self.last_img:

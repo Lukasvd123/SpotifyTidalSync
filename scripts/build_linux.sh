@@ -9,6 +9,9 @@ echo "Building SpotifySync for Linux..."
 
 pip install -r requirements.txt
 
+# Install optional Linux media detection
+pip install dbus-python 2>/dev/null || echo "Note: dbus-python install failed. Install via system package manager if needed."
+
 # Clean previous builds
 rm -rf _build
 
@@ -26,7 +29,7 @@ fi
 
 # Build
 mkdir -p _build
-pyinstaller --noconsole --onefile --add-data ".env:." \
+pyinstaller --noconsole --onefile \
     $ICON_FLAG \
     --name "SpotifySync" \
     --distpath "_build/dist" \
