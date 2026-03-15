@@ -68,15 +68,6 @@ if platform.system() == "Windows":
         except ImportError:
             pass
 
-# Linux MPRIS media detection (optional)
-DBUS_AVAILABLE = False
-if platform.system() == "Linux":
-    try:
-        import dbus
-        DBUS_AVAILABLE = True
-    except ImportError:
-        pass
-
 # --- RESOURCE HELPER ---
 def get_resource_path(relative_path):
     """Get path to resource, works for dev and PyInstaller bundled exe."""
@@ -88,7 +79,7 @@ def get_resource_path(relative_path):
 APP_NAME = "SpotifyTidalSync"
 KEYRING_SERVICE = "SpotifyTidalSync"
 
-APPDATA_DIR = os.path.join(os.environ['APPDATA'] if platform.system() == "Windows" else os.path.expanduser('~/.config'), APP_NAME)
+APPDATA_DIR = os.path.join(os.environ['APPDATA'], APP_NAME)
 
 if not os.path.exists(APPDATA_DIR):
     os.makedirs(APPDATA_DIR)
@@ -355,7 +346,7 @@ class MediaInfo:
 
 
 class MediaDetector:
-    """Detects currently playing media via OS-level APIs (SMTC on Windows, MPRIS on Linux)."""
+    """Detects currently playing media via Windows SMTC."""
 
     def __init__(self):
         self._last_error_time = 0
@@ -389,12 +380,10 @@ class MediaDetector:
 
     def get_current_media(self, preferred_source="spotify"):
         """Get currently playing media from OS. Returns MediaInfo or None."""
-        if platform.system() == "Windows" and SMTC_AVAILABLE:
+        if SMTC_AVAILABLE:
             return self._get_windows_media(preferred_source)
-        elif platform.system() == "Linux" and DBUS_AVAILABLE:
-            return self._get_linux_media(preferred_source)
         else:
-            self._log_error_throttled("No media detection available (install winsdk on Windows or dbus-python on Linux)")
+            self._log_error_throttled("No media detection available (install winsdk)")
             return None
 
     def _get_windows_media(self, preferred_source):
@@ -478,86 +467,11 @@ class MediaDetector:
             self._log_error_throttled(f"SMTC async error: {e}")
             return None
 
-    def _get_linux_media(self, preferred_source):
-        """Get media info via Linux D-Bus MPRIS."""
-        try:
-            bus = dbus.SessionBus()
-            services = [s for s in bus.list_names() if s.startswith('org.mpris.MediaPlayer2.')]
-
-            if not services:
-                return None
-
-            best_service = None
-            preferred_service = None
-
-            for service_name in services:
-                app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
-                if app_name in IGNORED_APPS:
-                    continue
-
-                if app_name == preferred_source.lower():
-                    preferred_service = service_name
-                    break
-
-                # Check if playing
-                try:
-                    proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
-                    props = dbus.Interface(proxy, 'org.freedesktop.DBus.Properties')
-                    status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
-                    if status == 'Playing' and best_service is None:
-                        best_service = service_name
-                except:
-                    continue
-
-            service_name = preferred_service or best_service
-            if service_name is None:
-                # Fall back to first non-ignored
-                for s in services:
-                    app_name = s.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
-                    if app_name not in IGNORED_APPS:
-                        service_name = s
-                        break
-
-            if service_name is None:
-                return None
-
-            proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
-            props = dbus.Interface(proxy, 'org.freedesktop.DBus.Properties')
-
-            metadata = props.Get('org.mpris.MediaPlayer2.Player', 'Metadata')
-            status = str(props.Get('org.mpris.MediaPlayer2.Player', 'PlaybackStatus'))
-
-            title = str(metadata.get('xesam:title', ''))
-            artists = metadata.get('xesam:artist', [])
-            artist = str(artists[0]) if artists else ''
-            album = str(metadata.get('xesam:album', ''))
-
-            app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0]
-
-            status_map = {'Playing': 'playing', 'Paused': 'paused', 'Stopped': 'stopped'}
-            status_str = status_map.get(status, 'unknown')
-
-            if not title:
-                return None
-
-            return MediaInfo(
-                title=title,
-                artist=artist,
-                album=album,
-                playback_status=status_str,
-                source_app=app_name,
-            )
-        except Exception as e:
-            self._log_error_throttled(f"MPRIS error: {e}")
-            return None
-
     def send_control(self, command):
         """Send media control command via OS media controls.
         Commands: 'play', 'pause', 'play_pause', 'next', 'previous'"""
-        if platform.system() == "Windows" and SMTC_AVAILABLE:
+        if SMTC_AVAILABLE:
             self._run_async(self._async_send_control(command))
-        elif platform.system() == "Linux" and DBUS_AVAILABLE:
-            self._send_linux_control(command)
 
     async def _async_send_control(self, command):
         """Send control via SMTC."""
@@ -578,31 +492,6 @@ class MediaDetector:
                 await func()
         except Exception as e:
             logger.debug(f"SMTC control error: {e}")
-
-    def _send_linux_control(self, command):
-        """Send control via MPRIS."""
-        try:
-            bus = dbus.SessionBus()
-            services = [s for s in bus.list_names() if s.startswith('org.mpris.MediaPlayer2.')]
-            for service_name in services:
-                app_name = service_name.replace('org.mpris.MediaPlayer2.', '').split('.')[0].lower()
-                if app_name in IGNORED_APPS:
-                    continue
-                proxy = bus.get_object(service_name, '/org/mpris/MediaPlayer2')
-                player = dbus.Interface(proxy, 'org.mpris.MediaPlayer2.Player')
-                cmd_map = {
-                    'play': player.Play,
-                    'pause': player.Pause,
-                    'play_pause': player.PlayPause,
-                    'next': player.Next,
-                    'previous': player.Previous,
-                }
-                func = cmd_map.get(command)
-                if func:
-                    func()
-                break  # Only control first non-ignored player
-        except Exception as e:
-            logger.debug(f"MPRIS control error: {e}")
 
     def _identify_app(self, raw_id):
         """Map OS app IDs to known friendly names."""
@@ -733,7 +622,7 @@ class PrefetchCache:
 # --- AUDIO PLAYER ---
 class AudioPlayer:
     def __init__(self):
-        self.instance = vlc.Instance('--no-video', '--verbose=-1', '--aout=directsound' if platform.system() == "Windows" else '', '--network-caching=1500')
+        self.instance = vlc.Instance('--no-video', '--verbose=-1', '--aout=mmdevice', '--network-caching=1500')
         self.player = self.instance.media_player_new()
         try: self.player.audio_set_volume(100)
         except: pass
@@ -1546,10 +1435,7 @@ class SettingsWindow(ModernToplevel):
         chk_share.pack(anchor='w', padx=15, pady=5)
 
         # Mixer Button
-        mixer_text = "Open Volume Mixer"
-        if platform.system() == "Linux": mixer_text = "Open Linux Audio Control"
-
-        tk.Button(frame, text=mixer_text, command=self.open_mixer,
+        tk.Button(frame, text="Open Volume Mixer", command=self.open_mixer,
                   bg="#333333", fg="white", relief="flat", padx=10, pady=5).pack(anchor='w', padx=20, pady=20)
 
         # Danger Zone
@@ -1812,17 +1698,8 @@ class SettingsWindow(ModernToplevel):
         if did: self.manager.player.set_device(did)
 
     def open_mixer(self):
-        sys_os = platform.system()
         try:
-            if sys_os == "Windows":
-                subprocess.Popen(["start", "ms-settings:apps-volume"], shell=True)
-            elif sys_os == "Linux":
-                cmd = None
-                if shutil.which("pavucontrol"): cmd = ["pavucontrol"]
-                elif shutil.which("gnome-control-center"): cmd = ["gnome-control-center", "sound"]
-
-                if cmd: subprocess.Popen(cmd)
-                else: messagebox.showinfo("Linux Audio", "Could not find 'pavucontrol' or gnome-settings.")
+            subprocess.Popen(["start", "ms-settings:apps-volume"], shell=True)
         except Exception as e:
             logger.error(f"Error opening mixer: {e}")
 
