@@ -12,9 +12,15 @@ This tool is designed for users who prefer the music discovery and UI of their f
 
 * **Local Playback Control:** Track advancement is based on local playback finishing, not the source app's internal timing. No more premature skipping when track lengths differ slightly.
 
+* **Position Sync:** Automatically syncs playback position with your source app. If you start a song mid-way, seek to a different position, or restart the track, VLC follows. Works via Spotify API or OS-level position detection (MPRIS/SMTC).
+
 * **Optional Spotify API:** Enable in Settings > Spotify API for queue prefetch (pre-loads next 4-5 tracks), precise seek sync, and duration-based matching. Disabled by default.
 
-* **Smart Quality Fallback:** Tries to play in **HiRes/Max** quality first. If a track fails (e.g., region lock or API restriction), it automatically retries with Lossless or High quality to ensure music keeps playing.
+* **Smart Quality Fallback:** Tries to play in **HiRes/Max** quality first. If a track fails (e.g., region lock or API restriction), it automatically retries with Lossless or High quality to ensure music keeps playing. The current playback quality is displayed in the UI.
+
+* **Single Instance:** Only one instance of the app can run at a time. Attempting to launch a second instance shows an error and exits.
+
+* **Remote Playback Ignored:** If your source app (e.g., Spotify) is playing on another device (phone, web player), the app won't start local playback. It only reacts to local playback activity.
 
 * **Seek Slider & Skip Controls:** Drag the seek bar to jump anywhere in the track, or use the **-10s / +10s** buttons to skip forward and backward.
 
@@ -24,13 +30,13 @@ This tool is designed for users who prefer the music discovery and UI of their f
 
 * **Playback Control:** Pause, Play, Next, Previous, and seek controls that sync seamlessly. Uses Spotify API when enabled, otherwise controls via OS media transport.
 
-* **Smart Muting:** Can automatically mute the source app. On Windows, uses per-app audio muting (pycaw) for reliable silence.
+* **Smart Muting:** Can automatically mute the source app. On Windows, uses per-app audio muting (pycaw) for reliable silence. On Linux, uses pactl for per-stream muting.
 
 * **Audio Isolation:** For complete audio isolation, the app guides you through setting up VB-Cable (free virtual audio cable) so your source app outputs to a silent virtual device. See Settings > Audio Isolation.
 
 * **Auto-Favorite:** Optional setting to automatically add songs to your Tidal favorites if you listen to 90% of the track.
 
-* **Selectable Audio Output:** Choose your specific output device (DAC, Headphones, Speakers) within the app settings. Device list is scrollable and adapts to your window size.
+* **Selectable Audio Output:** Choose your specific output device (DAC, Headphones, Speakers) within the app settings. Device list is scrollable with a refresh button, and falls back to pactl device listing on Linux if VLC enumeration fails.
 
 * **Secure Session Caching:** You only need to log in to Tidal once. Your tokens are securely stored in the **Windows Credential Manager** (or Linux Keyring) using `keyring`. They are encrypted and tied to your OS login.
 
@@ -48,7 +54,7 @@ Before running or building the application, ensure you have the following:
 
   * [Download VLC Here](https://www.videolan.org/vlc/)
 
-* **Windows 10 or 11** (Linux supported via source)
+* **Windows 10 or 11 / Linux** (Fedora, Ubuntu, Arch, etc.)
 
 * **Python 3.10+** (only for building or running from source — the build script will install it for you if missing)
 
@@ -171,6 +177,14 @@ The build script signs the executable with a self-signed certificate. This reduc
 
 * **Browser won't open during login:** The app will show the login URL in a dialog and copy it to your clipboard. Open it manually in any browser.
 
-* **Premature track skipping:** The app waits for local VLC playback to finish before advancing. If the source app auto-advances while VLC is still playing, the source is paused until VLC catches up.
+* **Premature track skipping:** The app waits for local VLC playback to finish before advancing. If the source app auto-advances while VLC is still playing, the source is paused until VLC catches up. A skip cooldown prevents double-skipping.
+
+* **Album art not showing (Linux):** If you see a `PIL._tkinter_finder` error, make sure `python3-pillow-tk` (or equivalent) is installed. The app has a fallback that saves art to a temp file, but the PIL/tkinter bridge works best when properly installed.
+
+* **Wrong window icon (Linux):** The app sets `WM_CLASS` to `spotifysync` to match the `.desktop` file. If the icon still doesn't show, run `gtk-update-icon-cache ~/.local/share/icons/hicolor/` or log out and back in.
+
+* **Audio devices not loading:** Click the **Refresh** button in Settings > General to retry device enumeration. On Linux, the app falls back to `pactl` if VLC's device listing fails.
+
+* **App reacts when listening on another device:** The app only starts playback when the source is actively playing locally. If Spotify reports a track but is paused (playing on phone/web), the app waits.
 
 * **Spotify API not connecting:** Make sure you've checked "Enable Spotify API" in Settings, entered valid credentials, and restarted the app. The redirect URI must be exactly `http://127.0.0.1:8888/callback` in your Spotify app settings.

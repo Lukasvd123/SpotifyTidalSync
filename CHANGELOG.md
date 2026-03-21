@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.04] - 2026-03-21
+
+### Added
+- **Position sync**: VLC now syncs to the source app's playback position. Starting a song mid-way, seeking forward/backward, or restarting the track in Spotify are all followed by VLC automatically
+- **Source position reading**: Reads playback position from MPRIS (Linux) and SMTC (Windows) so position sync works even without the Spotify API
+- **Ongoing seek detection**: Every sync cycle checks if the source position jumped (>5s difference) and follows forward seeks, backward seeks, and song restarts
+- **Song restart detection**: If the source is near position 0 but VLC is far ahead, VLC restarts the song (handles "Previous" on same track)
+- **Quality indicator in UI**: A green label below the source indicator shows the current playback quality (e.g., "Quality: Hi Res Lossless")
+- **Quality mismatch logging**: Logs when the delivered quality differs from the requested quality (e.g., got LOSSLESS instead of HI_RES_LOSSLESS)
+- **Single-instance lock**: Only one instance of the app can run at a time. Uses `fcntl.flock` on Linux and `msvcrt.locking` on Windows. A second launch shows an error dialog and exits
+- **Remote playback filtering**: Ignores source app activity when it is not playing locally (e.g., Spotify playing on phone/web). Only reacts to local playback
+- **Skip cooldown**: 2-second cooldown after track changes prevents double-skipping when source and VLC advance simultaneously
+- **Audio device refresh button**: Refresh button in Settings > General to manually reload the device list
+- **pactl device fallback**: On Linux, falls back to `pactl list short sinks` if VLC device enumeration returns nothing
+- **Saved device selection**: Audio device list highlights the previously saved device on load
+
+### Changed
+- **No more Spotify position reset**: `attempt_play_tidal` no longer forces Spotify to seek to position 0. Instead reads the source's current position and starts VLC there
+- **PIL imported before tkinter**: Moved `from PIL import Image, ImageTk` before tkinter imports to avoid `_tkinter_finder` module errors on Linux
+- **Album art fallback**: If `ImageTk.PhotoImage` fails, falls back to saving to a temp PNG and loading via native `tk.PhotoImage`
+- **Icon fallback**: Window icon loading has the same temp-file fallback if PIL/tkinter bridge fails
+- **Linux WM_CLASS**: Main window created with `className="spotifysync"` so the window manager matches the `.desktop` file icon
+- **Device list UI redesigned**: Dark-themed `ttk.Scrollbar`, Spotify-green selection highlight, subtle border, and refresh button in the header row
+- **App version bumped to 0.04**
+
+### Fixed
+- Album art not displaying on Linux due to `No module named 'PIL._tkinter_finder'` error
+- Linux window icon showing as generic default instead of the app logo
+- Multiple instances of the app could run simultaneously, causing audio conflicts
+- App starting playback when user is listening on another device (phone, web player)
+- Double-skipping when source and VLC tracks end at roughly the same time
+- VLC not matching source position when starting a song mid-way through
+- Source seeks (forward, backward, restart) not being followed by VLC
+- Audio device list not loading on some Linux systems where VLC enumeration fails
+- Audio device list not selecting the previously saved device
+- Device list scrollbar and refresh button using outdated default styling
+
 ## [v0.03] - 2026-03-02
 
 ### Added
