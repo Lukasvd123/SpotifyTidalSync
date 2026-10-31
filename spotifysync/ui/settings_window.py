@@ -155,6 +155,9 @@ class SettingsWindow(DarkWindow):
     def _wipe(self):
         if not messagebox.askyesno("Reset", "Delete all settings and logins? The app will close."):
             return
+        # Unmute first: the wipe exits the app, and a Spotify left muted in the
+        # mixer stays muted after we are gone.
+        self.engine.shutdown()
         credentials.delete_all()
         shutil.rmtree(APPDATA_DIR, ignore_errors=True)
         os._exit(0)

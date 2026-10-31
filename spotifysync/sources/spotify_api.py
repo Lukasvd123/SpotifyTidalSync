@@ -71,7 +71,9 @@ class SpotifyController:
         if not self.available:
             return None
         try:
-            return self.client.current_playback()
+            # Without additional_types an episode comes back with item=None and
+            # is indistinguishable from "nothing playing".
+            return self.client.current_playback(additional_types="episode")
         except Exception as e:
             logger.debug(f"current_playback failed: {e}")
             return None

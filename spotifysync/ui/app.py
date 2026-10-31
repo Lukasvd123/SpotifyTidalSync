@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk
 import requests
 from PIL import Image, ImageTk
 
-from ..config import UI_FONT, logger, resource_path
+from ..config import UI_FONT, load_settings, logger, resource_path
 from .manual_match import ManualMatchWindow
 from .settings_window import SettingsWindow
 from .theme import (ACCENT, BG, BUTTON_STYLE, DIM, MUTED, TEXT, apply_dark_title_bar,
@@ -86,7 +86,9 @@ class MainApp(tk.Tk):
         self.source_label = ttk.Label(self, text="", style="Source.TLabel")
         self.source_label.pack(pady=(3, 0))
         self.quality_label = ttk.Label(self, text="", style="Quality.TLabel")
-        self.quality_label.pack(pady=(0, 10))
+        self.quality_label.pack()
+        self.match_label = ttk.Label(self, text="", style="Source.TLabel")
+        self.match_label.pack(pady=(0, 10))
 
         seek_row = tk.Frame(self, bg=BG)
         seek_row.pack(fill="x", padx=25, pady=(5, 0))
@@ -111,30 +113,38 @@ class MainApp(tk.Tk):
             (">>", self.engine.next_track, 4),
             ("+10s", lambda: self.engine.skip(10000), 4),
         ):
-            tk.Button(controls, text=text, width=width,
-                      command=lambda c=command: self._run(c), **BUTTON_STYLE
-                      ).pack(side="left", padx=3)
+            tk.Button(controls, text=text, width=width, command=command,
+                      **BUTTON_STYLE).pack(side="left", padx=3)
 
-        tk.Button(self, text="Wrong song? Fix match", command=self.open_manual_match,
-                  bg="#552222", fg="#ffbbbb", relief="flat", font=(UI_FONT, 9),
-                  bd=0, cursor="hand2").pack(pady=15)
+        # Spotify's own volume slider does nothing while it is muted.
+        volume_row = tk.Frame(self, bg=BG)
+        volume_row.pack(fill="x", padx=60)
+        tk.Label(volume_row, text="Vol", bg=BG, fg=DIM, font=(UI_FONT, 8)).pack(side="left")
+        self.volume = ttk.Scale(volume_row, from_=0, to=100, orient="horizontal",
+                                style="Seek.Horizontal.TScale",
+                                command=lambda v: self.engine.set_volume(float(v)))
+        self.volume.set(load_settings().get("volume", 100))
+        self.volume.pack(side="left", fill="x", expand=True, padx=5)
+
+        self.fix_button = tk.Button(self, text="Wrong song? Fix match",
+                                    command=self.open_manual_match, bg="#552222",
+                                    fg="#ffbbbb", relief="flat", font=(UI_FONT, 9),
+                                    bd=0, cursor="hand2")
+        self.fix_button.pack(pady=15)
 
         tk.Button(self, text="Settings", command=self.open_settings, bg="#1a1a1a",
                   fg=MUTED, relief="flat", bd=0, cursor="hand2"
                   ).pack(side="bottom", fill="x", pady=20)
 
     def _bind_keys(self):
-        self.bind("<space>", lambda _e: self._run(self.engine.toggle_play))
-        self.bind("<Right>", lambda _e: self._run(lambda: self.engine.skip(10000)))
-        self.bind("<Left>", lambda _e: self._run(lambda: self.engine.skip(-10000)))
-        self.bind("<Control-Right>", lambda _e: self._run(self.engine.next_track))
-        self.bind("<Control-Left>", lambda _e: self._run(self.engine.previous_track))
+        # Engine commands are queued and run by the sync loop, so calling them
+        # from the UI thread never blocks it.
+        self.bind("<space>", lambda _e: self.engine.toggle_play())
+        self.bind("<Right>", lambda _e: self.engine.skip(10000))
+        self.bind("<Left>", lambda _e: self.engine.skip(-10000))
+        self.bind("<Control-Right>", lambda _e: self.engine.next_track())
+        self.bind("<Control-Left>", lambda _e: self.engine.previous_track())
         self.bind("<Control-comma>", lambda _e: self.open_settings())
-
-    @staticmethod
-    def _run(command):
-        """Run an engine command off the UI thread; they make network calls."""
-        threading.Thread(target=command, daemon=True).start()
 
     # --- updates ---------------------------------------------------------
     def update_snapshot(self, snapshot):
@@ -164,6 +174,12 @@ class MainApp(tk.Tk):
         quality = snapshot["quality"]
         self.quality_label.config(
             text=f"Quality: {quality.replace('_', ' ').title()}" if quality else "")
+        match = snapshot.get("match")
+        self.match_label.config(text=f"Matched by {match}" if match else "")
+        if snapshot.get("low_confidence"):
+            self.fix_button.config(bg="#aa3333", fg="#ffffff")
+        else:
+            self.fix_button.config(bg="#552222", fg="#ffbbbb")
 
         self._load_art(snapshot["art_url"])
         self._show_pending_art()
@@ -189,8 +205,7 @@ class MainApp(tk.Tk):
 
     def _on_seek(self, _event):
         self._dragging = False
-        position = int(float(self.slider.get()))
-        self._run(lambda: self.engine.seek_to(position))
+        self.engine.seek_to(int(float(self.slider.get())))
 
     # --- album art -------------------------------------------------------
     def _load_art(self, url):
@@ -246,7 +261,14 @@ class MainApp(tk.Tk):
 
     def request_match(self, source_state):
         """Called from the sync thread when nothing matched."""
-        self.after(0, lambda: self.open_manual_match(source_state))
+        self.after(0, lambda: self._prompt_match(source_state))
+
+    def _prompt_match(self, source_state):
+        # One popup at a time; a playlist of unmatched tracks must not stack them.
+        existing = getattr(self, "_match_window", None)
+        if existing is not None and existing.winfo_exists():
+            return
+        self._match_window = ManualMatchWindow(self, self.engine, source_state)
 
     def open_settings(self):
         SettingsWindow(self, self.engine)

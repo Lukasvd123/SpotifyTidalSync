@@ -12,6 +12,7 @@ class ManualMatchWindow(DarkWindow):
     def __init__(self, parent, engine, source_state):
         super().__init__(parent, "Fix Match", 700, 500)
         self.engine = engine
+        self.source_state = source_state
         self.title_text = source_state.title
         self.artist_text = source_state.artist
         self.results = []
@@ -56,6 +57,10 @@ class ManualMatchWindow(DarkWindow):
                   font=(UI_FONT, 9, "bold")).pack(side="right")
         tk.Button(buttons, text="Cancel", command=self.destroy, bg="#444444",
                   fg=TEXT, relief="flat", padx=12, pady=5).pack(side="right", padx=10)
+        tk.Button(buttons, text="Not on Tidal", command=self.not_on_tidal, bg="#444444",
+                  fg=TEXT, relief="flat", padx=12, pady=5).pack(side="left")
+        tk.Label(buttons, text="Plays from Spotify from now on, without asking",
+                 bg=PANEL, fg=DIM, font=(UI_FONT, 8)).pack(side="left", padx=8)
 
         self.do_search()
 
@@ -96,6 +101,9 @@ class ManualMatchWindow(DarkWindow):
         index = self.tree.index(selection[0])
         if index >= len(self.results):
             return
-        track = self.results[index]
-        threading.Thread(target=self.engine.manual_map, args=(track,), daemon=True).start()
+        self.engine.manual_map(self.results[index])
+        self.destroy()
+
+    def not_on_tidal(self):
+        self.engine.mark_not_on_tidal(self.source_state)
         self.destroy()

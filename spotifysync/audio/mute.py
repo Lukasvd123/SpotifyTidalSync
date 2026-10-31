@@ -7,7 +7,7 @@ import os
 import subprocess
 import time
 
-from ..config import IS_LINUX, IS_WINDOWS, logger
+from ..config import IS_LINUX, IS_WINDOWS, MUTE_MARKER_FILE, logger
 
 PYCAW_AVAILABLE = False
 if IS_WINDOWS:
@@ -72,12 +72,36 @@ def _is_spotify(props):
     return "spotify" in haystack
 
 
+def _write_marker(muted):
+    """Record that we hold the source muted, so a crash can be undone.
+
+    Windows persists per-app mutes in the mixer and PipeWire's stream-restore
+    remembers them too: a killed app used to leave Spotify silent for good.
+    """
+    try:
+        if muted:
+            with open(MUTE_MARKER_FILE, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
+        elif os.path.exists(MUTE_MARKER_FILE):
+            os.remove(MUTE_MARKER_FILE)
+    except OSError as e:
+        logger.debug(f"Mute marker error: {e}")
+
+
 class SourceMuter:
-    def __init__(self, enabled=True):
+    def __init__(self, enabled=True, clock=time.monotonic):
         self.enabled = enabled
+        self.clock = clock
         self._muted = None          # our intended state, None = untouched
         self._last_assert = 0.0
         self._warned = False
+
+    def recover_from_crash(self):
+        """Unmute a source a previous run left muted."""
+        if os.path.exists(MUTE_MARKER_FILE):
+            logger.info("Previous run left the source muted; restoring it")
+            self._apply(False)
+            _write_marker(False)
 
     def mute(self, force=False):
         """Ensure the source is muted. Throttled unless `force`.
@@ -86,23 +110,33 @@ class SourceMuter:
         """
         if not self.enabled:
             return
-        now = time.monotonic()
+        now = self.clock()
         if not force and self._muted is True and (now - self._last_assert) < REASSERT_INTERVAL:
             return
         self._last_assert = now
+        if self._muted is not True:
+            _write_marker(True)
         self._muted = True
         self._apply(True)
 
     def unmute(self):
-        """Restore the source's audio (AI DJ commentary, shutdown)."""
+        """Restore the source's audio (AI DJ commentary, fallback, shutdown)."""
+        was_muted = self._muted
         self._muted = False
-        self._last_assert = time.monotonic()
-        self._apply(False)
+        self._last_assert = self.clock()
+        if was_muted is not False:
+            self._apply(False)
+        _write_marker(False)
+
+    @property
+    def is_muted(self):
+        return self._muted is True
 
     def restore(self):
         if self._muted:
             self._apply(False)
         self._muted = None
+        _write_marker(False)
 
     def _apply(self, mute):
         if IS_WINDOWS:
