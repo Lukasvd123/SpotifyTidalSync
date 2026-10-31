@@ -1,4 +1,1 @@
-from .mute import SourceMuter
-from .player import AudioPlayer
-
-__all__ = ["AudioPlayer", "SourceMuter"]
+"""Audio output (player.py, needs libvlc) and source muting (mute.py)."""
