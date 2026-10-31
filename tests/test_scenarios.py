@@ -156,6 +156,24 @@ def test_BD8_shorter_master_with_long_crossfade():
     assert w.longest_silence(t0 + 5) <= BOUNDARY_SILENCE_S
 
 
+def test_BD9_lagging_player_clock_does_not_replay_the_ending():
+    w = make_world(album(3), dj=True)
+    w.vlc.time_lag_ms = 12000
+    w.run(STARTUP_S + 400)
+    titles = w.played_titles()
+    assert titles[:3] == ["Song 0", "Song 1", "Song 2"]
+    assert all(start == 0 for _, _, start, _ in w.vlc.plays[:3])
+    assert w.engine._recoveries == 0
+
+
+def test_BD10_lagging_clock_mid_song_start_finishes_cleanly():
+    w = make_world(album(2), start_position_ms=120000)
+    w.vlc.time_lag_ms = 12000
+    w.run(STARTUP_S + 70)
+    assert w.played_titles()[:2] == ["Song 0", "Song 1"]
+    assert w.vlc.plays[1][2] == 0
+
+
 # --- user actions -----------------------------------------------------------
 def test_UA1_skip_in_spotify_switches_promptly():
     w = make_world(album(3))

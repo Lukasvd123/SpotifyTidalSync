@@ -2,6 +2,7 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -279,6 +280,12 @@ class TidalLibrary:
         return Match(best, "search", best_score)
 
     def _by_isrc(self, isrc):
+        ids = self._isrc_ids(isrc)
+        if ids is not None:
+            # tidalapi fetches each release one by one; at a track boundary
+            # that was seconds of silence for an ISRC with several releases.
+            with ThreadPoolExecutor(max_workers=min(8, len(ids) or 1)) as pool:
+                return [t for t in pool.map(self.track_by_id, ids) if t is not None]
         getter = getattr(self.session, "get_tracks_by_isrc", None)
         if getter is None:
             return []
@@ -287,6 +294,21 @@ class TidalLibrary:
         except Exception as e:
             logger.debug(f"ISRC lookup failed for {isrc}: {e}")
             return []
+
+    def _isrc_ids(self, isrc):
+        """Track ids for an ISRC from Tidal's v2 catalogue, or None when that
+        endpoint is unavailable (then tidalapi's own lookup is used)."""
+        request = getattr(self.session, "request", None)
+        base = getattr(getattr(self.session, "config", None), "openapi_v2_location", None)
+        if request is None or not base:
+            return None
+        try:
+            res = request.request("GET", "tracks", params={"filter[isrc]": isrc},
+                                  base_url=base).json()
+            return [item["id"] for item in res.get("data") or []]
+        except Exception as e:
+            logger.debug(f"ISRC lookup failed for {isrc}: {e}")
+            return None
 
     def save_mapping(self, key, tidal_id, spotify_id=None):
         self.mappings.put(key, tidal_id)

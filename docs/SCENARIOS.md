@@ -51,6 +51,9 @@ of our stream.
 | BD6 | Same track queued twice in a row | Plays twice, not skipped | all | test |
 | BD7 | End of the queue | Goes idle, no loop, no crash | all | test |
 | BD8 | Shorter master and a 12s crossfade | No gap, no skipped track | all | test |
+| BD9 | Player clock lags the audio (libvlc on Tidal MP4: up to 13s by the end) | Real end is not taken for a dropped stream, the ending is never replayed | all | test |
+| BD10 | Same, after a mid-song start | Next track starts from 0 | all | test |
+| BD11 | AI DJ: the API hides the queue | No prefetch possible; ISRC releases fetched in parallel to keep the boundary short | API | test (BD9), **manual** |
 
 ## User actions
 

@@ -200,6 +200,8 @@ class FakeApi:
 
     def queue(self, limit=5):
         sp = self.spotify
+        if sp.dj:
+            return []           # the DJ hides what it plays next
         upcoming = sp.queue[sp.index + 1: sp.index + 1 + limit]
         return [{"id": t.id, "name": t.title, "artists": [{"name": t.artist}],
                  "album": {"name": t.album}, "duration_ms": t.duration_ms}
@@ -301,6 +303,9 @@ class FakeVLC:
         self.standby_url = None
         self._standby_ready_at = 0.0
         self.volume = 100
+        # libvlc's get_time lags the audio on Tidal's MP4 streams (9-13s by the
+        # end of a song, measured); the stream itself still ends on time.
+        self.time_lag_ms = 0
         clock.listeners.append(self._step)
 
     def _step(self, dt):
@@ -363,7 +368,10 @@ class FakeVLC:
         return self.state
 
     def position_ms(self):
-        return -1 if self.state in ("idle", "ended", "error") else int(self.position)
+        if self.state in ("idle", "ended", "error"):
+            return -1
+        lag = self.time_lag_ms * self.position / max(1, self.duration)
+        return max(0, int(self.position - lag))
 
     def duration_ms(self):
         return -1 if self.state in ("idle", "ended", "error") else self.duration

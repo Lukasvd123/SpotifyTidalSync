@@ -68,7 +68,7 @@ class SyncEngine:
 
         settings = load_settings()
         if player is None:
-            from .audio import AudioPlayer
+            from .audio.player import AudioPlayer
             player = AudioPlayer()
         if source is None:
             from .sources import PlaybackSource
@@ -77,7 +77,7 @@ class SyncEngine:
             from .tidal import TidalLibrary
             library = TidalLibrary()
         if muter is None:
-            from .audio import SourceMuter
+            from .audio.mute import SourceMuter
             muter = SourceMuter(settings["mute_spotify"], clock=clock)
         if prefetch is None:
             from .tidal import Prefetcher
@@ -195,11 +195,11 @@ class SyncEngine:
         if self.state == State.PLAYING:
             self._track_player()
             status = self.player.status()
-            if status == "error" or (status == "ended" and self._ended_early()):
-                self._recover(src)
-                return
-            if status == "ended":
-                self._on_finished(src)
+            if status in ("ended", "error"):
+                if self._cut_short(src, status):
+                    self._recover(src)
+                else:
+                    self._on_finished(src)
                 return
             if self._pending is not None and self.clock() > self._hold_deadline:
                 logger.warning("Our track did not finish in time; moving on")
@@ -467,6 +467,8 @@ class SyncEngine:
         it as the end of the song."""
         self._recoveries += 1
         position = max(0, self._last_pos)
+        if self._positions_live and same_track(src, self.current):
+            position = max(0, src.position_at(self.clock()))
         if self._recoveries > MAX_RECOVERIES or self.current_track is None:
             self._fallback(src, "Tidal stream failed", popup=False)
             return
@@ -558,7 +560,25 @@ class SyncEngine:
         if duration > 0:
             self._duration = duration
 
-    def _ended_early(self):
+    def _cut_short(self, src, status):
+        """Whether our stream died before the song was over.
+
+        libvlc's position lags the audio on Tidal's MP4 streams by up to ~13s
+        at the end (its duration is right), so its own position cannot tell a
+        real end from a drop: that reconnected at the lagging position and
+        replayed the ending. The source's position is the better clock.
+        """
+        if self._pending is not None or not same_track(src, self.current):
+            return False  # the source has moved on: nothing left to resume
+        if self._positions_live:
+            now = self.clock()
+            if self._duration > 0 and src.position_at(now) >= self._duration - EARLY_EOF_MS:
+                return False
+            if src.duration_ms > 0 and src.near_end(EARLY_EOF_MS, now):
+                return False
+            return True
+        if status == "error":
+            return True
         return (self._duration > 0 and self._last_pos >= 0
                 and self._duration - self._last_pos > EARLY_EOF_MS)
 
