@@ -25,6 +25,9 @@ def resource_path(relative_path):
 
 
 def _appdata_root():
+    override = os.environ.get("SPOTIFYSYNC_HOME")
+    if override:
+        return override
     if IS_WINDOWS:
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
     elif IS_MACOS:
@@ -39,7 +42,9 @@ os.makedirs(APPDATA_DIR, exist_ok=True)
 
 SETTINGS_FILE = os.path.join(APPDATA_DIR, "settings.json")
 MAPPINGS_FILE = os.path.join(APPDATA_DIR, "mappings.json")
+MATCH_CACHE_FILE = os.path.join(APPDATA_DIR, "match_cache.json")
 LOG_FILE = os.path.join(APPDATA_DIR, "debug.log")
+MUTE_MARKER_FILE = os.path.join(APPDATA_DIR, "muted.flag")
 
 # --- Sync tunables ---------------------------------------------------------
 # The loop is cheap (VLC state reads); only the Spotify snapshot is rate
@@ -64,6 +69,28 @@ HANDOFF_MS = 1500
 # mid-song. Below this we always start at 0 and rewind the (muted) source.
 MIDSONG_START_MS = 20000
 
+# A natural-end hold never lasts longer than this. More of our track left than
+# that means the source change was a skip, not a crossfade.
+HOLD_MAX_MS = 30000
+
+# When our track ends first and the source has more than this left, skip the
+# (muted) source forward instead of sitting in silence until it gets there.
+EARLY_END_SKIP_MS = 1500
+
+# VLC reporting Ended with more than this left is a dropped stream, not an end.
+EARLY_EOF_MS = 5000
+
+# Stream recovery attempts per track before falling back to the source's audio.
+MAX_RECOVERIES = 2
+
+# Drift between source and our player that gets the source pulled back in line.
+DRIFT_CORRECT_MS = 3000
+
+# Resolve the next track's stream this long before the current one ends, and
+# pre-buffer it in the standby player for a gapless switch.
+PREFETCH_URL_MS = 30000
+PREBUFFER_MS = 15000
+
 # A source position that deviates from its own expected progression by more
 # than this means the user seeked deliberately, so mirror it onto VLC.
 SEEK_EPSILON_MS = 3500
@@ -82,25 +109,32 @@ DEFAULT_SETTINGS = {
     "auto_favorite": False,
     "use_spotify_api": False,
     "last_device_id": None,
+    "volume": 100,
+    "spotify_device_id": None,
 }
 
 
 def _load_json(path):
     try:
         if os.path.exists(path):
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 return json.loads(content) if content else {}
     except Exception as e:
         logger.error(f"Load error {path}: {e}")
+        # Keep the broken file for inspection instead of overwriting it.
+        try:
+            os.replace(path, path + ".corrupt")
+        except OSError:
+            pass
     return {}
 
 
 def _save_json(path, data):
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=4)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
         os.replace(tmp, path)
     except Exception as e:
         logger.error(f"Save error {path}: {e}")
@@ -141,9 +175,15 @@ def setup_logging(level=logging.DEBUG):
     # the OS media key, so its own logging is pure noise.
     logging.getLogger("spotipy").setLevel(logging.CRITICAL)
 
-    handlers = [logging.StreamHandler(sys.stdout), _QueueHandler()]
+    handlers = [_QueueHandler()]
+    # Windowed builds (PyInstaller --noconsole) have no stdout at all.
+    if sys.stdout is not None:
+        handlers.append(logging.StreamHandler(sys.stdout))
     try:
-        handlers.append(logging.FileHandler(LOG_FILE, mode="w"))
+        # Keep the previous run's log: after a crash it is the one that matters.
+        if os.path.exists(LOG_FILE):
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+        handlers.append(logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"))
     except OSError:
         pass
 

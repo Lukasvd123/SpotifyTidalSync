@@ -5,11 +5,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import tidalapi
-
 from . import credentials
-from .config import logger
-from .matching import MappingStore, make_mapping_key, pick_best
+from .config import MATCH_CACHE_FILE, logger
+from .matching import (CONFIDENT_SCORE, NOT_ON_TIDAL, MappingStore, TrackQuery, describe,
+                       legacy_mapping_key, make_mapping_key, pick_best, search_title)
 
 # Tidal stream URLs are signed and time limited. Treat a prefetched one as stale
 # well before that so we never hand VLC a dead link.
@@ -18,9 +17,33 @@ STREAM_URL_TTL = 240.0
 _QUALITY_ORDER = ("hi_res_lossless", "high_lossless", "low_320k", "low_96k",
                   "lossless", "high", "low")
 
+# A 401 for one quality is usually about that one track (no hi-res master in
+# this region). Only give up on the quality for the whole session after this
+# many different tracks in a row were refused.
+QUALITY_STRIKES = 3
+
+
+class LoginResult:
+    OK = "ok"
+    OFFLINE = "offline"
+    FAILED = "failed"
+
+
+def _tidalapi():
+    import tidalapi
+    return tidalapi
+
+
+def _is_network_error(exc):
+    try:
+        import requests
+        return isinstance(exc, (requests.ConnectionError, requests.Timeout))
+    except ImportError:
+        return False
+
 
 def preferred_quality():
-    quality = getattr(tidalapi, "Quality", None)
+    quality = getattr(_tidalapi(), "Quality", None)
     if quality is None:
         return None
     for name in ("hi_res_lossless", "high_lossless", "low_320k", "lossless",
@@ -43,24 +66,52 @@ class Resolved:
         return bool(self.url) and (time.monotonic() - self.fetched_at) < STREAM_URL_TTL
 
 
+@dataclass
+class Match:
+    """How a source track was matched: method is mapping, cache, isrc or search."""
+    track: object
+    method: str
+    score: float = 0.0
+
+    @property
+    def label(self):
+        if self.method == "search":
+            return f"search ({self.score:.0f})"
+        return self.method
+
+
 class TidalLibrary:
-    def __init__(self):
-        self.session = None
+    def __init__(self, session=None):
+        self.session = session
         self.mappings = MappingStore()
-        self._unauthorized = set()
+        self.auto_matches = MappingStore(MATCH_CACHE_FILE)
+        self._strikes = {}          # quality -> set of track ids refused in a row
+        self._disabled = set()
 
     # --- login -----------------------------------------------------------
     def login(self, open_browser=None):
+        """Log in, preferring the cached session. Returns a LoginResult."""
+        tidalapi = _tidalapi()
         quality = preferred_quality()
         if not quality:
             logger.error("tidalapi exposes no Quality enum; cannot continue")
-            return False
+            return LoginResult.FAILED
 
-        self.session = tidalapi.Session(config=tidalapi.Config(quality=quality))
+        if self.session is None:
+            self.session = tidalapi.Session(config=tidalapi.Config(quality=quality))
 
-        if self._load_cached_session() and self.session.check_login():
-            logger.info("Tidal: logged in from cached session")
-            return True
+        try:
+            if self._load_cached_session():
+                logger.info("Tidal: logged in from cached session")
+                # tidalapi refreshes an expired access token while loading;
+                # save it so the next start does not have to again.
+                self._save_session()
+                return LoginResult.OK
+        except Exception as e:
+            if _is_network_error(e):
+                logger.warning(f"Tidal: offline ({e.__class__.__name__}), will retry")
+                return LoginResult.OFFLINE
+            logger.warning(f"Cached Tidal session unusable: {e}")
 
         logger.info("Tidal: login required")
         try:
@@ -78,48 +129,52 @@ class TidalLibrary:
 
             if self.session.check_login():
                 self._save_session()
-                return True
+                return LoginResult.OK
             logger.error("Tidal: login did not complete")
-            return False
+            return LoginResult.FAILED
         except Exception as e:
+            if _is_network_error(e):
+                logger.warning(f"Tidal: offline during login ({e.__class__.__name__})")
+                return LoginResult.OFFLINE
             logger.error(f"Tidal login failed: {e}")
-            return False
+            return LoginResult.FAILED
 
     def _load_cached_session(self):
         data = credentials.get_json(credentials.TIDAL_SESSION_KEY)
-        if not data:
+        if not data or not data.get("access_token"):
             return False
-        try:
-            expiry = None
-            if data.get("expiry_time"):
-                expiry = datetime.fromtimestamp(data["expiry_time"])
-            self.session.load_oauth_session(
-                data.get("token_type", "Bearer"),
-                data.get("access_token"),
-                data.get("refresh_token"),
-                expiry,
-            )
-            return True
-        except Exception as e:
-            logger.warning(f"Cached Tidal session unusable: {e}")
-            return False
+        expiry = None
+        if data.get("expiry_time"):
+            expiry = datetime.fromtimestamp(data["expiry_time"])
+        loaded = self.session.load_oauth_session(
+            data.get("token_type", "Bearer"),
+            data.get("access_token"),
+            data.get("refresh_token"),
+            expiry,
+        )
+        if loaded is False:
+            # Access token rejected outright: try the refresh token before
+            # making the user log in again.
+            refresh = data.get("refresh_token")
+            if not refresh or not self.session.token_refresh(refresh):
+                return False
+            loaded = self.session.load_oauth_session(
+                self.session.token_type, self.session.access_token,
+                self.session.refresh_token or refresh, self.session.expiry_time)
+        return bool(loaded) and self.session.check_login()
 
     def _save_session(self):
-        expiry = self.session.expiry_time
+        expiry = getattr(self.session, "expiry_time", None)
         credentials.set_json(credentials.TIDAL_SESSION_KEY, {
             "token_type": self.session.token_type,
             "access_token": self.session.access_token,
             "refresh_token": self.session.refresh_token,
             "expiry_time": expiry.timestamp() if expiry else None,
         })
-        logger.info("Tidal: session cached")
+        logger.debug("Tidal: session cached")
 
     def ensure_session(self):
-        """Refresh the OAuth token if it has expired.
-
-        The old check_and_refresh_session() called check_login() twice and
-        returned; it never actually refreshed anything.
-        """
+        """Refresh the OAuth token if it has expired."""
         try:
             if self.session.check_login():
                 return True
@@ -141,7 +196,7 @@ class TidalLibrary:
 
     def search(self, query, limit=15):
         try:
-            result = self.session.search(query, models=[tidalapi.media.Track], limit=limit)
+            result = self.session.search(query, models=[_tidalapi().media.Track], limit=limit)
         except Exception as e:
             logger.warning(f"Tidal search error: {e}")
             return []
@@ -149,37 +204,104 @@ class TidalLibrary:
             return result.get("tracks", []) or []
         return getattr(result, "tracks", []) or []
 
-    def find_match(self, title, artist, duration_ms=0, spotify_id=None):
-        """Resolve a source track to a Tidal track, honouring user mappings."""
-        key = make_mapping_key(title, artist)
-        mapped = self.mappings.lookup(key, spotify_id)
+    @staticmethod
+    def _keys(query, spotify_id=None):
+        return (make_mapping_key(query.title, query.artist), spotify_id,
+                legacy_mapping_key(query.title, query.artist))
+
+    def is_not_on_tidal(self, query, spotify_id=None):
+        return self.mappings.lookup(*self._keys(query, spotify_id)) is NOT_ON_TIDAL
+
+    def find_match(self, query, spotify_id=None):
+        """Resolve a source track to a Match, honouring user mappings.
+
+        Searches progressively and stops at the first confident result: ISRC,
+        then title + artist, title + album, and finally title alone (where the
+        artist and duration gates in the scorer do the filtering).
+        """
+        keys = self._keys(query, spotify_id)
+        mapped = self.mappings.lookup(*keys)
+        if mapped is NOT_ON_TIDAL:
+            return None
         if mapped:
             track = self.track_by_id(mapped)
             if track:
-                logger.info(f"Using saved mapping for '{title}'")
-                return track
+                logger.info(f"Using saved mapping for '{query.title}'")
+                return Match(track, "mapping")
 
-        clean = title.split("(")[0].split("-")[0].strip()
-        query = f"{clean} {artist}".strip()
-        logger.info(f"Searching Tidal: '{query}'")
-        candidates = self.search(query)
-        if not candidates:
-            logger.warning(f"No Tidal results for '{title}' by '{artist}'")
-            return None
+        cached = self.auto_matches.lookup(*keys[:2])
+        if cached:
+            track = self.track_by_id(cached)
+            if track:
+                logger.info(f"Using cached match for '{query.title}'")
+                return Match(track, "cache")
 
-        match = pick_best(candidates, title, artist, duration_ms)
-        if match is None:
-            logger.warning(f"No confident match for '{title}' by '{artist}'")
+        match = self._search_match(query)
+        if match and (match.method == "isrc" or match.score >= CONFIDENT_SCORE):
+            self.auto_matches.put(keys[0], match.track.id)
         return match
 
-    def save_mapping(self, key, tidal_id):
+    def _search_match(self, query):
+        if query.isrc:
+            tracks = self._by_isrc(query.isrc)
+            if tracks:
+                track, score = pick_best(tracks, query)
+                # Same recording by definition; the scorer just picks the best
+                # of several releases and guards against bad ISRC data.
+                if track is not None:
+                    logger.info(f"Matched '{query.title}' by ISRC")
+                    return Match(track, "isrc", score)
+
+        title = search_title(query.title)
+        queries = [f"{title} {query.artist}".strip()]
+        if query.album and query.album.lower() != title.lower():
+            queries.append(f"{title} {query.album}")
+        queries.append(title)
+
+        seen, pool = set(), []
+        best, best_score = None, float("-inf")
+        for text in dict.fromkeys(queries):
+            logger.info(f"Searching Tidal: '{text}'")
+            for cand in self.search(text):
+                cand_id = getattr(cand, "id", id(cand))
+                if cand_id not in seen:
+                    seen.add(cand_id)
+                    pool.append(cand)
+            best, best_score = pick_best(pool, query)
+            if best is not None and best_score >= CONFIDENT_SCORE:
+                break
+
+        if best is None:
+            logger.warning(f"No confident match for '{query.title}' by '{query.artist}' "
+                           f"(best score {best_score:.0f})")
+            return None
+        logger.info(f"Matched '{describe(best).title}' by '{query.artist}' (score {best_score:.0f})")
+        return Match(best, "search", best_score)
+
+    def _by_isrc(self, isrc):
+        getter = getattr(self.session, "get_tracks_by_isrc", None)
+        if getter is None:
+            return []
+        try:
+            return getter(isrc) or []
+        except Exception as e:
+            logger.debug(f"ISRC lookup failed for {isrc}: {e}")
+            return []
+
+    def save_mapping(self, key, tidal_id, spotify_id=None):
         self.mappings.put(key, tidal_id)
+        self.auto_matches.remove(key, spotify_id)
+
+    def mark_not_on_tidal(self, key, spotify_id=None):
+        self.mappings.put(key, NOT_ON_TIDAL)
+        self.auto_matches.remove(key, spotify_id)
 
     # --- streaming -------------------------------------------------------
     def _qualities(self):
-        quality = tidalapi.Quality
+        quality = _tidalapi().Quality
         order = [getattr(quality, name) for name in _QUALITY_ORDER if hasattr(quality, name)]
-        usable = [q for q in order if q not in self._unauthorized]
+        order = list(dict.fromkeys(order))
+        usable = [q for q in order if q not in self._disabled]
         return usable or order or [preferred_quality()]
 
     def stream_url(self, track):
@@ -187,9 +309,20 @@ class TidalLibrary:
         for quality in self._qualities():
             url, label = self._try_quality(track, quality)
             if url:
+                self._strikes.pop(quality, None)
                 return url, label
         logger.error(f"Could not stream '{track.name}' at any quality")
         return None, None
+
+    def _refused(self, quality, track, label):
+        strikes = self._strikes.setdefault(quality, set())
+        strikes.add(getattr(track, "id", id(track)))
+        if len(strikes) >= QUALITY_STRIKES and quality not in self._disabled:
+            logger.info(f"Quality {label} refused for {len(strikes)} tracks in a row; "
+                        "skipping it for this session")
+            self._disabled.add(quality)
+        else:
+            logger.info(f"Quality {label} not available for '{track.name}'")
 
     def _try_quality(self, track, quality):
         label = str(quality).split(".")[-1].upper()
@@ -200,9 +333,7 @@ class TidalLibrary:
                 return url, label
         except Exception as e:
             if "401" in str(e):
-                if quality not in self._unauthorized:
-                    logger.info(f"Quality {label} not available on this account")
-                    self._unauthorized.add(quality)
+                self._refused(quality, track, label)
                 return None, None
             logger.debug(f"get_url({label}) failed: {e}")
 
@@ -245,19 +376,39 @@ class TidalLibrary:
             return ""
 
 
-class Prefetcher:
-    """Resolves upcoming queue tracks in the background.
+def query_from_api_item(item):
+    artists = tuple(a.get("name", "") for a in item.get("artists") or [] if a.get("name"))
+    return TrackQuery(
+        title=item.get("name") or "",
+        artist=artists[0] if artists else "",
+        artists=artists,
+        album=(item.get("album") or {}).get("name") or "",
+        duration_ms=item.get("duration_ms") or 0,
+        isrc=(item.get("external_ids") or {}).get("isrc") or "",
+    )
 
-    Matching costs a Tidal search and fetching a stream URL costs several more
-    round trips; doing both at the boundary is what makes track changes drag.
+
+def _run_in_thread(fn):
+    threading.Thread(target=fn, daemon=True).start()
+
+
+class Prefetcher:
+    """Works ahead on the Spotify queue so track changes do not wait on Tidal.
+
+    At track start the next few queue entries are matched (a search each).
+    Near the end of the track the immediate next one also gets its stream URL,
+    late enough that the signed URL is still fresh when we get there; fetching
+    it at track start left it expired for any song longer than the TTL.
     """
 
-    def __init__(self, library, source):
+    def __init__(self, library, source, run_async=_run_in_thread):
         self.library = library
         self.source = source
+        self._run_async = run_async
         self._lock = threading.Lock()
         self._cache = {}
         self._busy = False
+        self._next_keys = ()
 
     def get(self, *keys):
         with self._lock:
@@ -265,6 +416,11 @@ class Prefetcher:
                 if key and key in self._cache:
                     return self._cache[key]
         return None
+
+    @property
+    def next_up(self):
+        """Cached entry for the first track in the queue, if matched."""
+        return self.get(*self._next_keys) if self._next_keys else None
 
     def _store(self, keys, resolved):
         with self._lock:
@@ -276,53 +432,64 @@ class Prefetcher:
         with self._lock:
             self._cache = {k: v for k, v in self._cache.items() if k in keep}
 
-    def start(self, current_keys=()):
-        if not self.source.api_available:
-            return
+    def _claim(self):
         with self._lock:
             if self._busy:
-                return
+                return False
             self._busy = True
-        threading.Thread(target=self._run, args=(set(current_keys),), daemon=True).start()
+            return True
 
-    def _run(self, keep):
+    def _release(self):
+        with self._lock:
+            self._busy = False
+
+    def start(self, current_keys=()):
+        """Match the upcoming queue in the background."""
+        if not self.source.api_available or not self._claim():
+            return
+        self._run_async(lambda: self._match_upcoming(set(current_keys)))
+
+    def warm_next(self):
+        """Fetch the stream URL for the next track in the background."""
+        entry = self.next_up
+        if entry is None or entry.url_fresh or not self._claim():
+            return
+        self._run_async(lambda: self._resolve_next(entry))
+
+    def _match_upcoming(self, keep):
         try:
             upcoming = self.source.upcoming(limit=3)
-            for track in upcoming:
-                artists = track.get("artists") or []
-                if not artists:
+            logger.debug(f"Prefetch: queue has {len(upcoming)} upcoming track(s)")
+            entries = []
+            for item in upcoming:
+                query = query_from_api_item(item)
+                if not query.title or not query.artist:
                     continue
-                keep.add(make_mapping_key(track["name"], artists[0]["name"]))
-                keep.add(track.get("id"))
+                keys = (make_mapping_key(query.title, query.artist), item.get("id"))
+                keep.update(keys)
+                entries.append((query, keys, item.get("id")))
             self._prune(keep)
+            self._next_keys = entries[0][1] if entries else ()
 
-            for position, track in enumerate(upcoming):
-                artists = track.get("artists") or []
-                if not artists:
+            for query, keys, spotify_id in entries:
+                if self.get(*keys) or self.library.is_not_on_tidal(query, spotify_id):
                     continue
-                keys = (make_mapping_key(track["name"], artists[0]["name"]), track.get("id"))
-                if self.get(*keys):
-                    continue
-
-                match = self.library.find_match(
-                    title=track["name"],
-                    artist=artists[0]["name"],
-                    duration_ms=track.get("duration_ms", 0),
-                    spotify_id=track.get("id"),
-                )
-                if not match:
-                    continue
-
-                # Only pre-resolve the stream URL for the immediate next track;
-                # further ahead it would expire before we get there.
-                resolved = self.library.resolve(match) if position == 0 else Resolved(track=match)
-                if resolved:
-                    self._store(keys, resolved)
-                    logger.debug(f"Prefetched: {track['name']}"
-                                 f"{' (+stream)' if resolved.url else ''}")
-                time.sleep(1.0)
+                match = self.library.find_match(query, spotify_id=spotify_id)
+                if match:
+                    self._store(keys, Resolved(track=match.track))
+                    logger.debug(f"Prefetched match: {query.title}")
         except Exception as e:
             logger.debug(f"Prefetch error: {e}")
         finally:
-            with self._lock:
-                self._busy = False
+            self._release()
+
+    def _resolve_next(self, entry):
+        try:
+            resolved = self.library.resolve(entry.track)
+            if resolved:
+                self._store(self._next_keys, resolved)
+                logger.debug(f"Prefetched stream: {entry.track.name}")
+        except Exception as e:
+            logger.debug(f"Prefetch stream error: {e}")
+        finally:
+            self._release()
