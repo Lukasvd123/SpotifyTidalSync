@@ -11,8 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 try:
-    import mpv
-    mpv.MPV(ao="null", video=False, config=False).terminate()
+    # Through the player module, which puts a bundled libmpv-2.dll on the
+    # search path before importing mpv, as the app does.
+    from spotifysync.audio import player as player_module
+    player_module.mpv.MPV(ao="null", video=False, config=False).terminate()
     _usable, _reason = True, ""
 except Exception as e:  # OSError when libmpv is missing
     _usable, _reason = False, repr(e)
@@ -22,8 +24,6 @@ if not _usable:
     if os.environ.get("REQUIRE_MPV"):
         raise RuntimeError(f"libmpv required but not usable: {_reason}")
     pytest.skip(f"libmpv not usable: {_reason}", allow_module_level=True)
-
-from spotifysync.audio import player as player_module  # noqa: E402
 
 SECONDS = 4
 
@@ -44,7 +44,8 @@ def tone(tmp_path_factory):
 
 @pytest.fixture
 def player(monkeypatch):
-    monkeypatch.setenv("PIPEWIRE_PROPS", "")   # restored afterwards
+    monkeypatch.setenv("PIPEWIRE_PROPS", "")   # both restored afterwards
+    monkeypatch.setenv("PULSE_PROP", "")
     p = player_module.AudioPlayer(ao="null")
     yield p
     p.stop()

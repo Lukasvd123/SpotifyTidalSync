@@ -60,7 +60,7 @@ Release: 1
 Summary: Play Spotify's queue through Tidal's lossless and hi-res streams
 License: LicenseRef-OFL-1.0
 URL: https://github.com/Lukasvd123/SpotifyTidalSync
-Requires: alsa-lib, pulseaudio-libs, pipewire-libs, libglvnd-egl, libglvnd-glx, libglvnd-opengl, libdrm, libwayland-client, libwayland-cursor, libwayland-egl, libxcb
+{requires}
 AutoReqProv: no
 %define __strip /bin/true
 %define _build_id_links none
@@ -222,6 +222,35 @@ def build_appimage():
     return out
 
 
+GLIBC = ("libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so", "libutil.so",
+         "libresolv.so", "ld-linux")
+
+
+def system_sonames(app):
+    """Libraries the bundle links against but leaves to the system: whatever
+    PyInstaller excludes (GL, Wayland, ...) plus the sound server clients."""
+    bundled = {f.name for f in (app / "_internal").iterdir()}
+    needed = set()
+    for path in [app / "SpotifySync", *(app / "_internal").rglob("*.so*")]:
+        if not path.is_file() or path.is_symlink():
+            continue
+        out = subprocess.run(["readelf", "-d", str(path)], capture_output=True, text=True).stdout
+        needed.update(re.findall(r"Shared library: \[(.+?)\]", out))
+    return sorted(n for n in needed - bundled if not n.startswith(GLIBC))
+
+
+def deb_packages(sonames):
+    """Debian packages that provide `sonames` on the build machine."""
+    packages = set()
+    for soname in sonames:
+        out = subprocess.run(["dpkg", "-S", f"*/{soname}"], capture_output=True, text=True).stdout
+        names = {line.split(":", 1)[0] for line in out.splitlines() if ":" in line}
+        if not names:
+            sys.exit(f"No package on this machine provides {soname}")
+        packages.add(sorted(names)[0])
+    return sorted(packages)
+
+
 def _system_tree():
     """/opt/spotifysync plus menu entry and icons, shared by the deb and rpm."""
     app = onedir()
@@ -247,12 +276,16 @@ def build_deb():
     control = tree / "DEBIAN"
     control.mkdir()
     size_kb = sum(f.stat().st_size for f in tree.rglob("*") if f.is_file()) // 1024
+    # Ubuntu 24.04 renamed many libraries to "<name>t64" and left the old name
+    # virtual: apt satisfied libasound2 with an OSS emulation that lacks ALSA's
+    # API. Prefer the renamed package; the old name covers 22.04 and Debian 12.
+    depends = ", ".join(["libc6 (>= 2.35)", *(
+        f"{pkg}t64 | {pkg}"
+        for pkg in deb_packages(system_sonames(tree / "opt" / "spotifysync")))])
     (control / "control").write_text(
         f"Package: spotifysync\nVersion: {version()}\nArchitecture: amd64\n"
         "Maintainer: Lukas <noreply@github.com>\n"
-        "Depends: libc6 (>= 2.35), libasound2 | libasound2t64, libpulse0, "
-        "libpipewire-0.3-0 | libpipewire-0.3-0t64, libegl1, libgl1, libopengl0, libdrm2, "
-        "libwayland-client0, libwayland-cursor0, libwayland-egl1, libxcb1, libxcb-dri3-0\n"
+        f"Depends: {depends}\n"
         f"Installed-Size: {size_kb}\nSection: sound\nPriority: optional\n"
         "Description: Play Spotify's queue through Tidal's lossless and hi-res streams\n")
     DIST.mkdir(exist_ok=True)
@@ -267,7 +300,9 @@ def build_rpm():
     shutil.rmtree(top, ignore_errors=True)
     (top / "SPECS").mkdir(parents=True)
     spec = top / "SPECS" / "spotifysync.spec"
-    spec.write_text(RPM_SPEC.format(version=version(), root=tree))
+    requires = "\n".join(f"Requires: {soname}()(64bit)"
+                         for soname in system_sonames(tree / "opt" / "spotifysync"))
+    spec.write_text(RPM_SPEC.format(version=version(), root=tree, requires=requires))
     subprocess.run(["rpmbuild", "-bb", "--define", f"_topdir {top}", str(spec)], check=True)
     built = next((top / "RPMS").rglob("*.rpm"))
     DIST.mkdir(exist_ok=True)

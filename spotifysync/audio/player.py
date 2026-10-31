@@ -47,9 +47,20 @@ import mpv  # noqa: E402
 # ffmpeg refuses that mix unless the protocols are allowed explicitly.
 _PROTOCOLS = "protocol_whitelist=[file,http,https,tls,tcp,crypto,data]"
 
-# Stream properties libpipewire reads from the environment when mpv opens its
-# stream: force the graph (and the DAC) to the track's rate.
-_PIPEWIRE_PROPS = "{ node.force-rate = 0 media.role = Music }"
+# Stream properties read from the environment when mpv opens its stream:
+# force the PipeWire graph (and the DAC) to the track's rate. PIPEWIRE_PROPS is
+# for mpv's PipeWire output (verified); PULSE_PROP for the PulseAudio output
+# that the Linux packages' older mpv uses, which pipewire-pulse passes on.
+_RATE_ENV = {"PIPEWIRE_PROPS": "{ node.force-rate = 0 media.role = Music }",
+             "PULSE_PROP": "node.force-rate='0' media.role='music'"}
+
+
+def _set_rate_env(enabled):
+    for key, value in _RATE_ENV.items():
+        if enabled:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
 
 
 def _audio_output():
@@ -74,7 +85,7 @@ class AudioPlayer:
         if self.force_rate:
             # Without this the track is resampled to whatever rate other
             # apps' streams hold the device at.
-            os.environ["PIPEWIRE_PROPS"] = _PIPEWIRE_PROPS
+            _set_rate_env(True)
 
         options = dict(
             video=False, vo="null", ao=_audio_output(), idle=True,
@@ -148,10 +159,7 @@ class AudioPlayer:
         if force_rate is not None and IS_LINUX:
             self.force_rate = bool(force_rate)
             save_setting("force_rate", self.force_rate)
-            if self.force_rate:
-                os.environ["PIPEWIRE_PROPS"] = _PIPEWIRE_PROPS
-            else:
-                os.environ.pop("PIPEWIRE_PROPS", None)
+            _set_rate_env(self.force_rate)
         try:
             self._mpv.command("ao-reload")
         except Exception as e:

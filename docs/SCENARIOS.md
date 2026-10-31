@@ -136,7 +136,7 @@ of our stream.
 | QA3 | Volume 100, ReplayGain off, exclusive / forced rate | "bit-perfect" shown; mpv output format equals the source | IN8, **manual** |
 | QA4 | Volume below 100 or ReplayGain on | Not shown as bit-perfect | IN8-9 |
 | QA5 | Another app holds the Windows device exclusively | Falls back to shared mode instead of silence | **manual** |
-| QA6 | Linux: other apps hold PipeWire at 48 kHz | Graph switches to the track's rate while playing | **manual** (verified on a KEF LSX II LT) |
+| QA6 | Linux: other apps hold PipeWire at 48 kHz | Graph switches to the track's rate while playing | **manual**: verified with mpv's PipeWire output (source install) on a KEF LSX II LT; the packages' PulseAudio path (`PULSE_PROP`) is not verified yet |
 | QA7 | Old libmpv in the Linux packages (Ubuntu 22.04: 0.34) | loadfile without index, ReplayGain via a filter | IN10, CI |
 
 ## Updates

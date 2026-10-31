@@ -42,6 +42,7 @@ jobs:
           Get-Content "$env:SPOTIFYSYNC_HOME\self-test.txt"
           if ($p.ExitCode -ne 0) { exit 1 }
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: windows
           path: dist/SpotifySync.exe
@@ -68,17 +69,21 @@ jobs:
       - name: Self-test AppImage
         run: |
           SPOTIFYSYNC_HOME=$RUNNER_TEMP/a APPIMAGE_EXTRACT_AND_RUN=1 dist/SpotifySync-x86_64.AppImage --self-test
-      - name: Self-test deb on a clean Ubuntu 24.04
+      - name: Self-test deb on clean Ubuntu 24.04 and Debian 12
         run: |
-          docker run --rm -v "$PWD/dist:/dist" ubuntu:24.04 sh -c '
-            apt-get update -qq && apt-get install -y -qq /dist/spotifysync_*_amd64.deb >/dev/null &&
-            SPOTIFYSYNC_HOME=/tmp/s spotifysync --self-test'
+          for image in ubuntu:24.04 debian:12; do
+            echo "== $image"
+            docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist" "$image" sh -c '
+              apt-get update -qq && apt-get install -y -qq /dist/spotifysync_*_amd64.deb >/dev/null &&
+              SPOTIFYSYNC_HOME=/tmp/s spotifysync --self-test' || exit 1
+          done
       - name: Self-test rpm on a clean Fedora
         run: |
           docker run --rm -v "$PWD/dist:/dist" fedora:latest sh -c '
             dnf install -y -q /dist/spotifysync-*.x86_64.rpm &&
             SPOTIFYSYNC_HOME=/tmp/s spotifysync --self-test'
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: linux
           path: |
