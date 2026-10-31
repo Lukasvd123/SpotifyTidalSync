@@ -4,6 +4,118 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Hi-res releases were skipped** for songs that are also on CD-quality compilations: the ISRC lookup read only the first page of releases and took the closest name, so e.g. "Torn" played 16-bit/44.1 while Tidal has it at 24-bit. Hi-res releases of the same recording now win, and previously cached matches are looked up again once
+
+## [v0.06] - 2026-10-31
+
+### Added
+- **Real lossless and hi-res**: Tidal now only streams FLAC to its newer (PKCE) login, as MPEG-DASH. The app logs in that way (a one-time browser login, pasting back the address you land on), offers the upgrade to existing logins, and plays DASH. Before this, every stream was AAC 320 kbps while the app said HI_RES_LOSSLESS
+- **Bit-perfect output**: Windows uses WASAPI exclusive mode (Settings toggle, on by default); Linux forces the PipeWire graph to the track's sample rate. The quality line shows the real format, e.g. "FLAC 24-bit/96 kHz · bit-perfect"
+- **Optional ReplayGain** from Tidal's track gain, capped so peaks never clip (off by default: it changes the samples)
+- **Release packages** built by CI: Windows .exe (libmpv bundled), AppImage, .deb and .rpm, each self-tested (`--self-test`) on a clean system, with SHA-256 checksums and signed build provenance
+- **Update check**: a button appears when a newer release exists. The .exe and AppImage update themselves after verifying the download's SHA-256; deb/rpm point to the release
+- Settings tab "Tidal & Quality"
+
+### Changed
+- **Player: libmpv instead of VLC.** VLC 3 could not play Tidal's DASH streams, had no exclusive mode on Windows, and its clock lagged the audio by up to 13s at the end of a song, which made the app replay endings
+- A stream that ends while Spotify is already at (or past) its end is a finished song, not a dropped stream
+- ISRC lookups fetch all releases in parallel (1.25s to 0.26s), shortening boundaries under the AI DJ, whose queue the API hides
+- VLC is no longer required
+
+### Removed
+- The Windows build no longer creates a self-signed certificate or adds it to the trusted root store
+
+### Fixed
+- Windows/macOS CI: importing the audio package no longer needs the player library
+- Windows: the instance lock no longer blocks reading the running instance's PID
+
+## [v0.05] - 2026-10-31
+
+### Added
+- **Scenario test suite**: the real sync engine runs against a simulated Spotify, VLC and Tidal on a fake clock, asserting on what is audible (gaps, double audio, seeks). Plus unit tests, a UI smoke test and real-libvlc integration tests. See `docs/SCENARIOS.md`
+- **CI** on Linux, Windows and macOS (Python 3.10/3.12/3.13), with VLC installed for the integration tests
+- **Gapless switches**: the next queue track is pre-buffered in a standby player
+- **ISRC matching** and progressive search (title + artist, title + album, title)
+- **Auto-match cache**: confident matches are remembered, replays skip the search
+- **"Not on Tidal"** button: the track plays from Spotify from then on, no popup
+- **Volume slider** in the app; match method and confidence shown under the quality
+- **Stream recovery**: a dropped stream reconnects at the same position
+- **Podcast and ad pass-through**, and playback on another device is left alone
+- **Crash-safe muting**: a marker file lets the next start unmute Spotify
+- MPRIS seek (`SetPosition`) and SMTC seek without the Spotify API
+- New logo: the interlaced note, now white on a gradient disc so it shows on light and dark taskbars
+
+### Changed
+- When the Tidal master ends before Spotify's, Spotify is skipped forward instead of waited for (the 1-6s gaps)
+- Mid-song starts open the stream at the position instead of seeking after playback began
+- Seeks are only followed when confirmed by a second reading and our player is not already there
+- No match or a failed stream unmutes Spotify instead of leaving silence; the popup appears once per track
+- UI actions go through a command queue run by the sync loop
+- Matching: title must actually match (numbers and words), all credited artists count, album and runtime weigh in, generic study titles need a close runtime, instrumental-only releases accepted when everything else agrees
+- Linux: Spotify is chosen over other players, controls target the same player that is read, Spotify ids and art read from MPRIS
+- Windows: controls target Spotify's session (not the "current" one), SMTC positions extrapolated, DPI aware
+- Tidal login retries while offline and refreshes expired tokens before asking for a new login
+- Log is UTF-8 and the previous run is kept as `debug.log.1`
+- macOS shows a clear "not supported yet" message
+
+### Fixed
+- 1-6s silence at track boundaries when the Tidal master was shorter
+- Jumps and stutters shortly after a track started
+- One track without hi-res downgrading every later track to lossless
+- A different song by the same artist being played when the right one was missing
+- All Japanese/Korean/Cyrillic/Arabic titles sharing one mapping key
+- Playing every track in between after a burst of skips
+- Silence for the rest of a song after a long pause or suspend
+- Duplicate tracks and repeat-one leaving silence
+- Local files not being detected
+- Phone playback being mirrored on the PC and paused by the app
+- Spotify left muted after a crash, kill or factory reset
+- Our own VLC stream (and the user's VLC) being forced to 100% volume
+- Second instance truncating the running instance's lock file
+
+### Removed
+- Community corrections and the VB-Cable tab (dropped in the package refactor; README updated)
+
+## [v0.04] - 2026-03-21
+
+### Added
+- **Position sync**: VLC now syncs to the source app's playback position. Starting a song mid-way, seeking forward/backward, or restarting the track in Spotify are all followed by VLC automatically
+- **Source position reading**: Reads playback position from MPRIS (Linux) and SMTC (Windows) so position sync works even without the Spotify API
+- **Ongoing seek detection**: Every sync cycle checks if the source position jumped (>5s difference) and follows forward seeks, backward seeks, and song restarts
+- **Song restart detection**: If the source is near position 0 but VLC is far ahead, VLC restarts the song (handles "Previous" on same track)
+- **Quality indicator in UI**: A green label below the source indicator shows the current playback quality (e.g., "Quality: Hi Res Lossless")
+- **Quality mismatch logging**: Logs when the delivered quality differs from the requested quality (e.g., got LOSSLESS instead of HI_RES_LOSSLESS)
+- **Single-instance lock**: Only one instance of the app can run at a time. Uses `fcntl.flock` on Linux and `msvcrt.locking` on Windows. A second launch shows an error dialog and exits
+- **Remote playback filtering**: Ignores source app activity when it is not playing locally (e.g., Spotify playing on phone/web). Only reacts to local playback
+- **Skip cooldown**: 2-second cooldown after track changes prevents double-skipping when source and VLC advance simultaneously
+- **Audio device refresh button**: Refresh button in Settings > General to manually reload the device list
+- **pactl device fallback**: On Linux, falls back to `pactl list short sinks` if VLC device enumeration returns nothing
+- **Saved device selection**: Audio device list highlights the previously saved device on load
+
+### Changed
+- **No more Spotify position reset**: `attempt_play_tidal` no longer forces Spotify to seek to position 0. Instead reads the source's current position and starts VLC there
+- **PIL imported before tkinter**: Moved `from PIL import Image, ImageTk` before tkinter imports to avoid `_tkinter_finder` module errors on Linux
+- **Album art fallback**: If `ImageTk.PhotoImage` fails, falls back to saving to a temp PNG and loading via native `tk.PhotoImage`
+- **Icon fallback**: Window icon loading has the same temp-file fallback if PIL/tkinter bridge fails
+- **Linux WM_CLASS**: Main window created with `className="spotifysync"` so the window manager matches the `.desktop` file icon
+- **Device list UI redesigned**: Dark-themed `ttk.Scrollbar`, Spotify-green selection highlight, subtle border, and refresh button in the header row
+- **App version bumped to 0.04**
+
+### Fixed
+- Album art not displaying on Linux due to `No module named 'PIL._tkinter_finder'` error
+- Linux window icon showing as generic default instead of the app logo
+- Multiple instances of the app could run simultaneously, causing audio conflicts
+- App starting playback when user is listening on another device (phone, web player)
+- Double-skipping when source and VLC tracks end at roughly the same time
+- VLC not matching source position when starting a song mid-way through
+- Source seeks (forward, backward, restart) not being followed by VLC
+- Audio device list not loading on some Linux systems where VLC enumeration fails
+- Audio device list not selecting the previously saved device
+- Device list scrollbar and refresh button using outdated default styling
+
 ## [v0.03] - 2026-03-02
 
 ### Added

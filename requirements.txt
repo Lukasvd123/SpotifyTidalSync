@@ -1,9 +1,11 @@
 tidalapi
-python-vlc
+mpv
 requests
 pillow
 pyinstaller
 keyring
-pycaw
-winrt-Windows.Media.Control
-winrt-Windows.Foundation
+spotipy
+pycaw; sys_platform == "win32"
+winrt-Windows.Media.Control; sys_platform == "win32"
+winrt-Windows.Foundation; sys_platform == "win32"
+dbus-python; sys_platform == "linux"

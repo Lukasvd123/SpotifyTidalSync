@@ -1,0 +1,120 @@
+name: release
+
+# Every push to linux builds and self-tests every package; a tag
+# "v<APP_VERSION>" also publishes them as a GitHub release.
+on:
+  push:
+    branches: [linux]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches APP_VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' spotifysync/__init__.py)
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "Tag $GITHUB_REF_NAME does not match APP_VERSION $version"; exit 1; }
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Build
+        run: python scripts/build_app.py windows
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $env:SPOTIFYSYNC_HOME = "$env:RUNNER_TEMP\selftest"
+          $p = Start-Process dist\SpotifySync.exe -ArgumentList "--self-test" -Wait -PassThru
+          Get-Content "$env:SPOTIFYSYNC_HOME\self-test.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows
+          path: dist/SpotifySync.exe
+
+  linux:
+    needs: version
+    # The oldest supported distro: packages built here run on newer ones.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmpv-dev libdbus-1-dev libglib2.0-dev pkg-config rpm
+          python -m pip install -r requirements.txt
+      - name: Build AppImage, deb and rpm
+        run: |
+          python scripts/build_app.py appimage
+          python scripts/build_app.py deb
+          python scripts/build_app.py rpm
+      - name: Self-test AppImage
+        run: |
+          SPOTIFYSYNC_HOME=$RUNNER_TEMP/a APPIMAGE_EXTRACT_AND_RUN=1 dist/SpotifySync-x86_64.AppImage --self-test
+      - name: Self-test deb on clean Ubuntu 24.04 and Debian 12
+        run: |
+          for image in ubuntu:24.04 debian:12; do
+            echo "== $image"
+            docker run --rm -e DEBIAN_FRONTEND=noninteractive -v "$PWD/dist:/dist" "$image" sh -c '
+              apt-get update -qq && apt-get install -y -qq /dist/spotifysync_*_amd64.deb >/dev/null &&
+              SPOTIFYSYNC_HOME=/tmp/s spotifysync --self-test' || exit 1
+          done
+      - name: Self-test rpm on a clean Fedora
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" fedora:latest sh -c '
+            dnf install -y -q /dist/spotifysync-*.x86_64.rpm &&
+            SPOTIFYSYNC_HOME=/tmp/s spotifysync --self-test'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux
+          path: |
+            dist/SpotifySync-x86_64.AppImage
+            dist/*.deb
+            dist/*.rpm
+
+  publish:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release
+      id-token: write        # sign the build attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes \
+            ${{ contains(github.ref_name, '-') && '--prerelease' || '' }}

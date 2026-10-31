@@ -8,8 +8,7 @@ build/
 *.spec
 *.exe
 
-# Converted icon (generated from logo.png during build)
-assets/*.ico
+# assets/logo.ico is a committed asset rendered from logo.svg
 
 # Python
 __pycache__/
@@ -39,3 +38,9 @@ Desktop.ini
 # Logs
 *.log
 debug.log
+
+# Pre-refactor monolith, kept for reference
+spotify.py.orig
+
+# libmpv-2.dll fetched by scripts/build_app.py
+lib/
