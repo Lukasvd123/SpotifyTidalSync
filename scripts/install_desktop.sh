@@ -6,7 +6,7 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 LAUNCHER="$PROJECT_ROOT/scripts/spotifysync-run.sh"
 DESKTOP_DIR="$HOME/.local/share/applications"
-ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
 BIN_DIR="$HOME/.local/bin"
 
 chmod +x "$LAUNCHER"

@@ -96,7 +96,7 @@ if [ -f "_build/dist/SpotifySync" ]; then
     # Install desktop shortcut so it appears in the app menu and can be double-clicked
     DESKTOP_DIR="$HOME/.local/share/applications"
     ICON_SRC="$PROJECT_ROOT/assets/logo.png"
-    ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
+    ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
     mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
     cp "$ICON_SRC" "$ICON_DIR/spotifysync.png"
     install -Dm 644 "$PROJECT_ROOT/assets/logo.svg" \
