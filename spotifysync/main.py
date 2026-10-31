@@ -13,6 +13,9 @@ from .config import APPDATA_DIR, IS_MACOS, IS_WINDOWS, logger, setup_logging
 VLC_URL = "https://www.videolan.org/vlc/"
 
 
+_LOCK_OFFSET = 4096
+
+
 def acquire_instance_lock():
     """Keep a single instance; two of them would fight over the mute state."""
     path = os.path.join(APPDATA_DIR, "instance.lock")
@@ -22,7 +25,9 @@ def acquire_instance_lock():
         handle = open(path, "a+")
         if IS_WINDOWS:
             import msvcrt
-            handle.seek(0)
+            # Windows locks block reads of the locked range too: lock a byte
+            # past the pid so it stays readable.
+            handle.seek(_LOCK_OFFSET)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
