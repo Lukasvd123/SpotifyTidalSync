@@ -39,3 +39,6 @@ Desktop.ini
 # Logs
 *.log
 debug.log
+
+# Pre-refactor monolith, kept for reference
+spotify.py.orig

@@ -99,17 +99,23 @@ if [ -f "_build/dist/SpotifySync" ]; then
 
     cat > "$DESKTOP_DIR/spotifysync.desktop" <<DESKTOP
 [Desktop Entry]
+Type=Application
 Name=SpotifySync
-Comment=Sync Spotify playback with Tidal Hi-Res audio
+GenericName=Music Player
+Comment=Play Spotify's queue through Tidal's hi-res streams
 Exec=$PROJECT_ROOT/SpotifySync
 Icon=spotifysync
 Terminal=false
-Type=Application
-Categories=Audio;Music;Player;
+Categories=AudioVideo;Audio;Music;Player;
+Keywords=spotify;tidal;music;hifi;sync;
+StartupNotify=true
+StartupWMClass=spotifysync
+SingleMainWindow=true
 DESKTOP
 
     desktop-file-validate "$DESKTOP_DIR/spotifysync.desktop" 2>/dev/null || true
     update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
     echo ""
     echo "Build Complete!"
