@@ -17,7 +17,7 @@ from .matching import (CONFIDENT_SCORE, NOT_ON_TIDAL, MappingStore, TrackQuery, 
                        legacy_mapping_key, make_mapping_key, pick_best, search_title)
 
 # Tidal stream URLs are signed and time limited. Treat a prefetched one as stale
-# well before that so we never hand VLC a dead link.
+# well before that so we never hand the player a dead link.
 STREAM_URL_TTL = 240.0
 
 _QUALITY_ORDER = ("hi_res_lossless", "high_lossless", "low_320k", "low_96k",

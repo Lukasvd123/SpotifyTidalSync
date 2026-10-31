@@ -1,1 +1,1 @@
-"""Audio output (player.py, needs libvlc) and source muting (mute.py)."""
+"""Audio output (player.py, needs libmpv) and source muting (mute.py)."""

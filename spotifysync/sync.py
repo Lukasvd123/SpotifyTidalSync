@@ -1,6 +1,6 @@
 """The sync engine.
 
-Model: Spotify plays muted and drives the queue; VLC plays the matching Tidal
+Model: Spotify plays muted and drives the queue; our player (libmpv) plays the matching Tidal
 stream and is the only thing you hear. Rules that follow from that:
 
   1. Our player is the clock. Boundaries are decided by when *our* audio ends,

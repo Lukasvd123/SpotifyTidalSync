@@ -1,6 +1,6 @@
 """Muting the source app so only our Tidal stream is audible.
 
-Spotify keeps playing (silently) as the queue master; we mirror it through VLC.
+Spotify keeps playing (silently) as the queue master; we mirror it through our own player.
 """
 
 import os

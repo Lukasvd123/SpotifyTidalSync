@@ -9,12 +9,27 @@ track's rate.
 
 import os
 import subprocess
+import sys
 import threading
 import time
 
-import mpv
+from ..config import IS_LINUX, IS_WINDOWS, load_settings, logger, resource_path, save_setting
 
-from ..config import IS_LINUX, IS_WINDOWS, load_settings, logger, save_setting
+
+def _expose_bundled_libmpv():
+    """python-mpv looks for libmpv-2.dll on PATH only. The .exe carries it in
+    its bundle; a source checkout gets it in lib/ from scripts/build_app.py."""
+    for folder in (getattr(sys, "_MEIPASS", None), resource_path("lib")):
+        if folder and os.path.isfile(os.path.join(folder, "libmpv-2.dll")):
+            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+            os.add_dll_directory(folder)
+            return
+
+
+if IS_WINDOWS:
+    _expose_bundled_libmpv()
+
+import mpv  # noqa: E402
 
 # The DASH demuxer opens a local manifest and fetches its segments over https;
 # ffmpeg refuses that mix unless the protocols are allowed explicitly.
@@ -79,9 +94,20 @@ class AudioPlayer:
             logger.debug(f"mpv end-file error {data.error} for entry {data.playlist_entry_id}")
 
     def _load(self, url, mode, options):
+        """loadfile, returning the new playlist entry's id. Linux packages
+        bundle the libmpv of an older distro (0.34): its loadfile has no index
+        argument and may not return the id."""
         encoded = ",".join(f"{k}={v}" for k, v in options.items())
-        result = self._mpv.command("loadfile", url, mode, -1, encoded)
-        return (result or {}).get("playlist_entry_id")
+        if self._mpv.mpv_version_tuple >= (0, 38, 0):
+            result = self._mpv.command("loadfile", url, mode, -1, encoded)
+        else:
+            result = self._mpv.command("loadfile", url, mode, encoded)
+        entry = (result or {}).get("playlist_entry_id")
+        if entry is None:
+            playlist = self._get("playlist", [])
+            pick = playlist[-1:] if mode == "append" else [e for e in playlist if e.get("current")]
+            entry = pick[0].get("id") if pick else None
+        return entry
 
     def _get(self, name, default=None):
         try:
@@ -122,7 +148,8 @@ class AudioPlayer:
     def _file_options(self, gain_db):
         options = {}
         if self.replaygain and gain_db:
-            options["volume-gain"] = f"{gain_db:.2f}"
+            # A per-file filter rather than volume-gain (mpv 0.36+ only).
+            options["af"] = f"lavfi=[volume={gain_db:.2f}dB]"
         return options
 
     # --- devices ---------------------------------------------------------

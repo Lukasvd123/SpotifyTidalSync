@@ -47,7 +47,7 @@ LOG_FILE = os.path.join(APPDATA_DIR, "debug.log")
 MUTE_MARKER_FILE = os.path.join(APPDATA_DIR, "muted.flag")
 
 # --- Sync tunables ---------------------------------------------------------
-# The loop is cheap (VLC state reads); only the Spotify snapshot is rate
+# The loop is cheap (player state reads); only the Spotify snapshot is rate
 # limited, so we can poll fast enough to catch boundaries crisply.
 POLL_INTERVAL = 0.35
 
@@ -77,7 +77,7 @@ HOLD_MAX_MS = 30000
 # (muted) source forward instead of sitting in silence until it gets there.
 EARLY_END_SKIP_MS = 1500
 
-# VLC reporting Ended with more than this left is a dropped stream, not an end.
+# The player reporting Ended with more than this left is a dropped stream, not an end.
 EARLY_EOF_MS = 5000
 
 # Stream recovery attempts per track before falling back to the source's audio.
@@ -92,7 +92,7 @@ PREFETCH_URL_MS = 30000
 PREBUFFER_MS = 15000
 
 # A source position that deviates from its own expected progression by more
-# than this means the user seeked deliberately, so mirror it onto VLC.
+# than this means the user seeked deliberately, so mirror it onto our player.
 SEEK_EPSILON_MS = 3500
 
 # After we seek the source ourselves, ignore seek detection briefly so our own
@@ -114,6 +114,7 @@ DEFAULT_SETTINGS = {
     "audio_exclusive": True,    # Windows: WASAPI exclusive, bit-perfect
     "force_rate": True,         # Linux: PipeWire runs at the track's rate
     "replaygain": False,        # changes samples, so off for bit-perfect
+    "check_updates": True,
 }
 
 

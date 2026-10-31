@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 import requests
 from PIL import Image, ImageTk
 
+from .. import updates
 from ..config import UI_FONT, load_settings, logger, resource_path
 from .manual_match import ManualMatchWindow
 from .settings_window import SettingsWindow
@@ -48,6 +49,9 @@ class MainApp(tk.Tk):
 
         self._poll_snapshot()
         self._poll_progress()
+        self._release = None
+        if load_settings().get("check_updates", True):
+            self.after(15000, self._check_updates)
 
     def _set_icon(self):
         path = resource_path(os.path.join("assets", "logo.png"))
@@ -136,6 +140,10 @@ class MainApp(tk.Tk):
         tk.Button(self, text="Settings", command=self.open_settings, bg="#1a1a1a",
                   fg=MUTED, relief="flat", bd=0, cursor="hand2"
                   ).pack(side="bottom", fill="x", pady=20)
+        # Packed only once a newer release exists.
+        self.update_button = tk.Button(self, text="", command=self._offer_update,
+                                       bg="#1f3d2b", fg="#b8f5cf", relief="flat", bd=0,
+                                       font=(UI_FONT, 9, "bold"), cursor="hand2")
 
     def _bind_keys(self):
         # Engine commands are queued and run by the sync loop, so calling them
@@ -277,6 +285,65 @@ class MainApp(tk.Tk):
         if existing is not None and existing.winfo_exists():
             return
         self._match_window = ManualMatchWindow(self, self.engine, source_state)
+
+    # --- app updates -----------------------------------------------------
+    def _check_updates(self):
+        def worker():
+            try:
+                release = updates.check()
+            except Exception as e:
+                logger.debug(f"Update check failed: {e}")
+                release = None
+            if release is not None:
+                self.after(0, lambda: self._show_update(release))
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(updates.CHECK_INTERVAL_S * 1000, self._check_updates)
+
+    def _show_update(self, release):
+        if self._release is None:
+            logger.info(f"Update available: {release.version}")
+        self._release = release
+        self.update_button.config(text=f"Update available: v{release.version}")
+        self.update_button.pack(side="bottom", fill="x", before=self.fix_button, pady=(0, 6))
+
+    def _offer_update(self):
+        release = self._release
+        if release is None:
+            return
+        if not updates.can_self_update(release):
+            hint = {"package": "Update it with your package manager, or download the new "
+                               "package from the release page.",
+                    "source": "Run 'git pull' in the app folder, or download a build."}.get(
+                updates.install_kind(), "Download it from the release page.")
+            if messagebox.askyesno("Update available",
+                                   f"Version {release.version} is available.\n\n{hint}\n\n"
+                                   "Open the release page?"):
+                open_browser(release.page, self)
+            return
+        if not messagebox.askyesno("Update available",
+                                   f"Install version {release.version} and restart?\n\n"
+                                   "The download is checked against the release's SHA-256."):
+            return
+        self.update_button.config(text="Downloading update...", state="disabled")
+
+        def worker():
+            try:
+                command = updates.install(release)
+            except Exception as e:
+                logger.error(f"Update failed: {e}")
+                message = str(e)
+                self.after(0, lambda: (self.update_button.config(
+                    text=f"Update available: v{release.version}", state="normal"),
+                    messagebox.showerror("Update failed", message)))
+                return
+            self.after(0, lambda: self._restart_into(command))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _restart_into(self, command):
+        self.engine.shutdown()
+        updates.relaunch(command)
+        self.destroy()
+        os._exit(0)
 
     def open_settings(self):
         SettingsWindow(self, self.engine)

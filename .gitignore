@@ -41,3 +41,6 @@ debug.log
 
 # Pre-refactor monolith, kept for reference
 spotify.py.orig
+
+# libmpv-2.dll fetched by scripts/build_app.py
+lib/

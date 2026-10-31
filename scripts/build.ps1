@@ -252,87 +252,14 @@ Run-Py -Arguments @("-m", "pip", "install", "pycaw", "winrt-Windows.Media.Contro
 Write-Host ""
 
 # ==========================================
-# STEP 6: Convert logo to .ico
+# STEP 6: Build (libmpv is downloaded, checksum-verified and bundled)
 # ==========================================
 
-$iconFlag = ""
+Write-Host "Building SpotifySync.exe..." -ForegroundColor Cyan
+Run-Py -Arguments @("-m", "pip", "install", "py7zr")
+Run-Py -Arguments @("scripts\build_app.py", "windows")
 
-# The committed logo.ico has every size rendered natively from logo.svg, which
-# stays sharp at 16px. Only fall back to downscaling logo.png without it.
-if (Test-Path "assets\logo.ico") {
-    Write-Host "[OK] Using assets\logo.ico" -ForegroundColor Green
-    $iconFlag = "--icon=$projectRoot\assets\logo.ico"
-} elseif (Test-Path "assets\logo.png") {
-    Write-Host "Converting logo for executable icon..." -ForegroundColor Cyan
-
-    $convertScript = "from PIL import Image; img = Image.open('assets/logo.png'); img.save('assets/logo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
-
-    try {
-        Run-Py -Arguments @("-c", $convertScript)
-
-        if (Test-Path "assets\logo.ico") {
-            Write-Host "[OK] Logo converted to .ico" -ForegroundColor Green
-            $iconFlag = "--icon=$projectRoot\assets\logo.ico"
-        }
-    } catch {
-        Write-Host "[WARNING] Could not convert logo: $_" -ForegroundColor Yellow
-        Write-Host "  Building without custom icon." -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "[NOTE] No logo.png found in assets/. Building without custom icon." -ForegroundColor Yellow
-}
-
-Write-Host ""
-
-# ==========================================
-# STEP 7: Clean previous builds
-# ==========================================
-
-Write-Host "Cleaning previous builds..." -ForegroundColor Cyan
-
-if (Test-Path "SpotifySync.exe") { Remove-Item "SpotifySync.exe" -Force }
-if (Test-Path "_build") { Remove-Item "_build" -Recurse -Force }
-
-# ==========================================
-# STEP 8: Build executable
-# ==========================================
-
-Write-Host "Building executable..." -ForegroundColor Cyan
-
-New-Item -ItemType Directory -Path "_build" -Force | Out-Null
-
-$logoAsset = "$projectRoot\assets\logo.png"
-
-# Build PyInstaller command with absolute paths (avoids splatting issues)
-$pyiArgs = @(
-    "-m", "PyInstaller",
-    "--noconsole",
-    "--onefile",
-    "--name", "SpotifySync",
-    "--distpath", "$projectRoot\_build\dist",
-    "--workpath", "$projectRoot\_build\build",
-    "--specpath", "$projectRoot\_build"
-)
-
-# Bundle logo for window icon
-if (Test-Path $logoAsset) {
-    $pyiArgs += @("--add-data", "$logoAsset;assets")
-}
-
-if ($iconFlag) {
-    $pyiArgs += $iconFlag
-}
-
-$pyiArgs += "spotify.py"
-
-# Invoke directly instead of Run-Py to preserve path arguments
-if ($pythonCmd -eq "py -3") {
-    & py -3 @pyiArgs
-} else {
-    & $pythonCmd @pyiArgs
-}
-
-if (-not (Test-Path "$projectRoot\_build\dist\SpotifySync.exe")) {
+if (-not (Test-Path "$projectRoot\dist\SpotifySync.exe")) {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Red
     Write-Host "BUILD FAILED" -ForegroundColor Red
@@ -343,58 +270,11 @@ if (-not (Test-Path "$projectRoot\_build\dist\SpotifySync.exe")) {
     exit
 }
 
-Move-Item "$projectRoot\_build\dist\SpotifySync.exe" "$projectRoot" -Force
+Copy-Item "$projectRoot\dist\SpotifySync.exe" "$projectRoot\SpotifySync.exe" -Force
 
-# ==========================================
-# STEP 9: Code Signing (self-signed)
-# ==========================================
-
-Write-Host ""
-Write-Host "Signing executable..." -ForegroundColor Cyan
-
-$certName = "SpotifyTidalSync"
-
-try {
-    $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
-            Where-Object { $_.Subject -match $certName } |
-            Select-Object -First 1
-
-    if (-not $cert) {
-        Write-Host "Creating self-signed code signing certificate..." -ForegroundColor Yellow
-        $cert = New-SelfSignedCertificate `
-            -Subject "CN=$certName" `
-            -Type CodeSigningCert `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -NotAfter (Get-Date).AddYears(5)
-
-        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
-        $store.Open("ReadWrite")
-        $store.Add($cert)
-        $store.Close()
-
-        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPublisher", "CurrentUser")
-        $store.Open("ReadWrite")
-        $store.Add($cert)
-        $store.Close()
-    }
-
-    $result = Set-AuthenticodeSignature -FilePath "SpotifySync.exe" -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -ErrorAction Stop
-
-    if ($result.Status -eq "Valid") {
-        Write-Host "[OK] Executable signed successfully." -ForegroundColor Green
-    } else {
-        Write-Host "[WARNING] Signing completed with status: $($result.Status)" -ForegroundColor Yellow
-    }
-} catch {
-    Write-Host "[NOTE] Code signing skipped: $_" -ForegroundColor Yellow
-    Write-Host "  The exe will work fine, but may trigger SmartScreen warnings." -ForegroundColor Yellow
-    Write-Host "  For full trust, an EV code signing certificate is needed." -ForegroundColor Yellow
-}
-
-# Clean up generated .ico after build
-if (Test-Path "assets\logo.ico") {
-    Remove-Item "assets\logo.ico" -Force
-}
+# No self-signed certificate: it is not trusted on any other PC, and adding it
+# to this PC's trusted roots would make Windows trust anything signed with a
+# key that sits unprotected in the user's certificate store.
 
 # ==========================================
 # DONE
@@ -406,11 +286,8 @@ Write-Host "BUILD SUCCESS!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "SpotifySync.exe is ready to use." -ForegroundColor Green
 Write-Host ""
-Write-Host "Note on code signing:" -ForegroundColor Yellow
-Write-Host "  A self-signed certificate has been used. This reduces some" -ForegroundColor Yellow
-Write-Host "  antivirus false positives but will NOT bypass Windows SmartScreen" -ForegroundColor Yellow
-Write-Host "  or corporate security policies. For full trust, purchase an EV" -ForegroundColor Yellow
-Write-Host "  code signing certificate from a CA like DigiCert or Sectigo." -ForegroundColor Yellow
+Write-Host "The exe is not code-signed, so SmartScreen may warn on first start" -ForegroundColor Yellow
+Write-Host "(More info > Run anyway)." -ForegroundColor Yellow
 Write-Host ""
 
 pause

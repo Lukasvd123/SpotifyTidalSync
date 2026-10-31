@@ -6,6 +6,7 @@ import os
 import struct
 import time
 import wave
+from types import SimpleNamespace
 
 import pytest
 
@@ -127,3 +128,29 @@ def test_IN8_untouched_output_at_full_volume(player, tone):
     assert info["source"]["samplerate"] == info["output"]["samplerate"] == 44100
     player.set_volume(80)
     assert not player.output_info()["bit_perfect"]
+
+
+def test_IN9_replaygain_filter_loads(player, tone):
+    player.replaygain = True
+    player.play_url(tone, gain_db=-3.5)
+    assert player.wait_until_playing(timeout=5)
+    assert player.status() == "playing"
+    assert not player.output_info()["bit_perfect"]
+
+
+def test_IN10_loadfile_without_index_argument(player, monkeypatch):
+    """The Linux packages bundle an older libmpv: its loadfile takes no index
+    and may not return the entry id."""
+    calls = []
+    old_mpv = SimpleNamespace(mpv_version_tuple=(0, 34, 1),
+                              command=lambda *a: calls.append(a) or None)
+    monkeypatch.setattr(player, "_get", lambda name, default=None:
+                        [{"id": 4, "current": True}, {"id": 5}] if name == "playlist" else default)
+    real, player._mpv = player._mpv, old_mpv
+    try:
+        assert player._load("x.flac", "replace", {"start": "1.000"}) == 4
+        assert player._load("y.flac", "append", {}) == 5
+    finally:
+        player._mpv = real
+    assert calls == [("loadfile", "x.flac", "replace", "start=1.000"),
+                     ("loadfile", "y.flac", "append", "")]
