@@ -256,7 +256,6 @@ Write-Host ""
 # ==========================================
 
 Write-Host "Building SpotifySync.exe..." -ForegroundColor Cyan
-Run-Py -Arguments @("-m", "pip", "install", "py7zr")
 Run-Py -Arguments @("scripts\build_app.py", "windows")
 
 if (-not (Test-Path "$projectRoot\dist\SpotifySync.exe")) {

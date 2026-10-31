@@ -102,7 +102,8 @@ def self_test(audio=False):
     try:
         from .audio.player import AudioPlayer
         player = AudioPlayer() if audio else AudioPlayer(ao="null")
-        line, code = f"ok: mpv {player._mpv.mpv_version}", 0
+        import mpv
+        line, code = f"ok: {player._mpv.mpv_version} from {mpv.backend._name}", 0
         if audio:
             player._mpv.volume = 0
             player.play_url("av://lavfi:anullsrc=d=1")

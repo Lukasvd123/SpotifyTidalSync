@@ -115,6 +115,20 @@ def download(url, expected):
     return target
 
 
+def extract_7z(archive, member, out):
+    """The mpv archives use the BCJ2 filter, which py7zr cannot unpack."""
+    out.mkdir(parents=True, exist_ok=True)
+    candidates = [shutil.which(n) for n in ("7z", "7za", "7zz")]
+    candidates.append(os.path.join(os.environ.get("ProgramFiles", ""), "7-Zip", "7z.exe"))
+    for tool in candidates:
+        if tool and os.path.isfile(tool):
+            subprocess.run([tool, "e", "-y", f"-o{out}", str(archive), member],
+                           check=True, stdout=subprocess.DEVNULL)
+            return
+    sys.exit("7-Zip is needed to unpack libmpv: install it from https://www.7-zip.org/ "
+             "(or 'winget install 7zip.7zip') and run the build again.")
+
+
 def fetch_libmpv():
     """libmpv-2.dll into lib/, where both the build and a source checkout find it."""
     dll = ROOT / "lib" / "libmpv-2.dll"
@@ -122,11 +136,11 @@ def fetch_libmpv():
     marker = dll.with_suffix(".sha256")
     if dll.exists() and marker.exists() and marker.read_text() == LIBMPV[1]:
         return dll
-    import py7zr
     dll.parent.mkdir(exist_ok=True)
-    with py7zr.SevenZipFile(archive) as z:
-        z.extract(path=CACHE / "libmpv", targets=["libmpv-2.dll"])
-    shutil.copy2(CACHE / "libmpv" / "libmpv-2.dll", dll)
+    out = CACHE / "libmpv"
+    shutil.rmtree(out, ignore_errors=True)
+    extract_7z(archive, "libmpv-2.dll", out)
+    shutil.copy2(out / "libmpv-2.dll", dll)
     marker.write_text(LIBMPV[1])
     print(f"libmpv: {dll}")
     return dll

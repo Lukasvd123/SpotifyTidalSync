@@ -51,7 +51,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: python -m pip install mpv requests keyring pytest py7zr
+        run: python -m pip install mpv requests keyring pytest
       - name: Install libmpv
         shell: bash
         run: |

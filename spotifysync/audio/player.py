@@ -7,6 +7,7 @@ through exclusive WASAPI, on Linux with the PipeWire graph forced to the
 track's rate.
 """
 
+import glob
 import os
 import subprocess
 import sys
@@ -16,18 +17,29 @@ import time
 from ..config import IS_LINUX, IS_WINDOWS, load_settings, logger, resource_path, save_setting
 
 
-def _expose_bundled_libmpv():
-    """python-mpv looks for libmpv-2.dll on PATH only. The .exe carries it in
-    its bundle; a source checkout gets it in lib/ from scripts/build_app.py."""
-    for folder in (getattr(sys, "_MEIPASS", None), resource_path("lib")):
-        if folder and os.path.isfile(os.path.join(folder, "libmpv-2.dll")):
-            os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
-            os.add_dll_directory(folder)
-            return
+def _use_bundled_libmpv():
+    """Make python-mpv load the libmpv shipped with a build.
+
+    python-mpv looks for libmpv-2.dll on PATH (Windows) and asks
+    ctypes.util.find_library("mpv") (Linux), which only searches the system:
+    a package would use whatever libmpv happens to be installed, or none.
+    """
+    if IS_WINDOWS:
+        for folder in (getattr(sys, "_MEIPASS", None), resource_path("lib")):
+            if folder and os.path.isfile(os.path.join(folder, "libmpv-2.dll")):
+                os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+                os.add_dll_directory(folder)
+                return
+    elif IS_LINUX and getattr(sys, "frozen", False):
+        bundled = sorted(glob.glob(os.path.join(sys._MEIPASS, "libmpv.so*")))
+        if bundled:
+            import ctypes.util
+            system_lookup = ctypes.util.find_library
+            ctypes.util.find_library = (
+                lambda name: bundled[-1] if name == "mpv" else system_lookup(name))
 
 
-if IS_WINDOWS:
-    _expose_bundled_libmpv()
+_use_bundled_libmpv()
 
 import mpv  # noqa: E402
 
