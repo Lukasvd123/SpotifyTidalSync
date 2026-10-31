@@ -257,7 +257,12 @@ Write-Host ""
 
 $iconFlag = ""
 
-if (Test-Path "assets\logo.png") {
+# The committed logo.ico has every size rendered natively from logo.svg, which
+# stays sharp at 16px. Only fall back to downscaling logo.png without it.
+if (Test-Path "assets\logo.ico") {
+    Write-Host "[OK] Using assets\logo.ico" -ForegroundColor Green
+    $iconFlag = "--icon=$projectRoot\assets\logo.ico"
+} elseif (Test-Path "assets\logo.png") {
     Write-Host "Converting logo for executable icon..." -ForegroundColor Cyan
 
     $convertScript = "from PIL import Image; img = Image.open('assets/logo.png'); img.save('assets/logo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"

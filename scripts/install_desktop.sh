@@ -12,6 +12,8 @@ BIN_DIR="$HOME/.local/bin"
 chmod +x "$LAUNCHER"
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR" "$BIN_DIR"
 install -m 644 "$PROJECT_ROOT/assets/logo.png" "$ICON_DIR/spotifysync.png"
+install -Dm 644 "$PROJECT_ROOT/assets/logo.svg" \
+    "$HOME/.local/share/icons/hicolor/scalable/apps/spotifysync.svg"
 
 # Command-line entry point, so `spotifysync` works from a shell too.
 ln -sf "$LAUNCHER" "$BIN_DIR/spotifysync"

@@ -64,8 +64,10 @@ pip install -r requirements.txt
 # Clean previous builds
 rm -rf _build
 
-# Convert logo if Pillow available
-if python3 -c "from PIL import Image" 2>/dev/null; then
+# Use the committed multi-size icon; only convert the PNG when it is missing.
+if [ -f assets/logo.ico ]; then
+    ICON_FLAG="--icon $PWD/assets/logo.ico"
+elif python3 -c "from PIL import Image" 2>/dev/null; then
     python3 -c "
 from PIL import Image
 img = Image.open('assets/logo.png')
@@ -81,6 +83,7 @@ fi
 mkdir -p _build
 pyinstaller --noconsole --onefile \
     $ICON_FLAG \
+    --add-data "$PWD/assets/logo.png:assets" \
     --name "SpotifySync" \
     --distpath "_build/dist" \
     --workpath "_build/build" \
@@ -96,6 +99,8 @@ if [ -f "_build/dist/SpotifySync" ]; then
     ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
     mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
     cp "$ICON_SRC" "$ICON_DIR/spotifysync.png"
+    install -Dm 644 "$PROJECT_ROOT/assets/logo.svg" \
+        "$HOME/.local/share/icons/hicolor/scalable/apps/spotifysync.svg"
 
     cat > "$DESKTOP_DIR/spotifysync.desktop" <<DESKTOP
 [Desktop Entry]

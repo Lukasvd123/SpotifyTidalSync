@@ -8,8 +8,7 @@ build/
 *.spec
 *.exe
 
-# Converted icon (generated from logo.png during build)
-assets/*.ico
+# assets/logo.ico is a committed asset rendered from logo.svg
 
 # Python
 __pycache__/
