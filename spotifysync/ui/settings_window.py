@@ -1,4 +1,4 @@
-"""Settings: audio device, toggles, Spotify API credentials, logs."""
+"""Settings: audio device, toggles, Tidal login and output, Spotify API, logs."""
 
 import os
 import shutil
@@ -10,7 +10,7 @@ from tkinter import messagebox, scrolledtext, ttk
 from .. import credentials
 from ..config import (APPDATA_DIR, IS_LINUX, IS_WINDOWS, UI_FONT, load_settings,
                       log_queue, logger, save_setting)
-from .theme import BG, DANGER, DIM, FIELD, MUTED, PANEL, TEXT, DarkWindow, open_browser
+from .theme import DANGER, DIM, MUTED, PANEL, TEXT, DarkWindow, open_browser
 
 API_HELP = (
     "Track detection uses your OS media controls by default, which works with "
@@ -37,13 +37,16 @@ class SettingsWindow(DarkWindow):
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
 
         general = tk.Frame(tabs, bg=PANEL)
+        quality = tk.Frame(tabs, bg=PANEL)
         spotify = tk.Frame(tabs, bg=PANEL)
         logs = tk.Frame(tabs, bg=PANEL)
         tabs.add(general, text="General")
+        tabs.add(quality, text="Tidal & Quality")
         tabs.add(spotify, text="Spotify API")
         tabs.add(logs, text="Logs")
 
         self._build_general(general)
+        self._build_quality(quality)
         self._build_spotify(spotify)
         self._build_logs(logs)
 
@@ -161,6 +164,55 @@ class SettingsWindow(DarkWindow):
         credentials.delete_all()
         shutil.rmtree(APPDATA_DIR, ignore_errors=True)
         os._exit(0)
+
+    # --- tidal and quality -----------------------------------------------
+    def _build_quality(self, frame):
+        tk.Label(frame, text="Tidal login", bg=PANEL, fg=TEXT,
+                 font=(UI_FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(20, 5))
+        if self.engine.library.is_pkce:
+            state = "Logged in for FLAC and hi-res."
+        else:
+            state = ("This login only receives AAC (lossy) from Tidal. "
+                     "Log in again to get FLAC and hi-res.")
+        tk.Label(frame, text=state, bg=PANEL, fg=DIM, font=(UI_FONT, 9),
+                 justify="left", wraplength=560).pack(anchor="w", padx=20)
+        tk.Button(frame, text="Log in to Tidal again", command=self._tidal_login,
+                  bg="#333333", fg=TEXT, relief="flat", padx=10, pady=5
+                  ).pack(anchor="w", padx=20, pady=(8, 18))
+
+        tk.Label(frame, text="Bit-perfect output", bg=PANEL, fg=TEXT,
+                 font=(UI_FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(0, 5))
+        settings = load_settings()
+        if IS_WINDOWS:
+            self.exclusive_var = tk.BooleanVar(value=settings["audio_exclusive"])
+            self._option(frame, "Exclusive mode: the device plays only Tidal, at the track's own "
+                                "rate and bit depth (other apps are silent on it meanwhile)",
+                         self.exclusive_var,
+                         lambda: self.engine.set_output_mode(exclusive=self.exclusive_var.get()))
+        elif IS_LINUX:
+            self.rate_var = tk.BooleanVar(value=settings["force_rate"])
+            self._option(frame, "Switch the device to each track's sample rate (other apps "
+                                "are resampled instead of the music)",
+                         self.rate_var,
+                         lambda: self.engine.set_output_mode(force_rate=self.rate_var.get()))
+        self.rg_var = tk.BooleanVar(value=settings["replaygain"])
+        self._option(frame, "Even out loudness between tracks (ReplayGain, from the next track; "
+                            "changes the samples, so not bit-perfect)",
+                     self.rg_var, lambda: self.engine.set_replaygain(self.rg_var.get()))
+        tk.Label(frame, text="Bit-perfect also needs the app volume at 100%: set the "
+                             "loudness on your speakers or amplifier instead.",
+                 bg=PANEL, fg=MUTED, font=(UI_FONT, 9), justify="left",
+                 wraplength=560).pack(anchor="w", padx=20, pady=(10, 0))
+
+    def _option(self, frame, text, variable, command):
+        tk.Checkbutton(frame, text=text, variable=variable, bg=PANEL, fg=TEXT,
+                       selectcolor=PANEL, activebackground=PANEL, activeforeground=TEXT,
+                       command=command, font=(UI_FONT, 9), wraplength=540, justify="left"
+                       ).pack(anchor="w", padx=18, pady=4)
+
+    def _tidal_login(self):
+        self.engine.tidal_login()
+        self.destroy()
 
     # --- spotify api -----------------------------------------------------
     def _build_spotify(self, frame):

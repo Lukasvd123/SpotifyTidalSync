@@ -15,6 +15,7 @@ class StubEngine:
                          get_audio_devices=lambda: [("Speakers", "dev1")],
                          set_device=lambda d: None)
         self.source = NS(api_available=False)
+        self.library = NS(is_pkce=False)
         self.current = NS(has_track=True, title="Song", artist="Artist")
 
     def __getattr__(self, name):
@@ -69,3 +70,16 @@ def test_UI4_settings_window_builds(app):
     window = SettingsWindow(app, app.engine)
     app.update()
     window.destroy()
+
+
+def test_UI5_tidal_login_dialog_needs_the_code_address(app):
+    from spotifysync.ui.tidal_login import TidalLoginWindow
+    results = []
+    win = TidalLoginWindow(app, "https://login.tidal.com/authorize?x", results.append)
+    win.entry.insert(0, "https://tidal.com/")
+    win._submit()
+    assert results == [] and "no login code" in win.error.cget("text")
+    win.entry.delete(0, "end")
+    win.entry.insert(0, " https://tidal.com/android/login/auth?code=abc ")
+    win._submit()
+    assert results == ["https://tidal.com/android/login/auth?code=abc"]

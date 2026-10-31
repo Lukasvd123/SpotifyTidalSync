@@ -1,5 +1,5 @@
 tidalapi
-python-vlc
+mpv
 requests
 pillow
 pyinstaller

@@ -1,5 +1,10 @@
 """Tidal session, matching and stream resolution."""
 
+import atexit
+import math
+import os
+import shutil
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -56,10 +61,13 @@ def preferred_quality():
 
 @dataclass
 class Resolved:
-    """A Tidal track plus, when already fetched, a playable stream URL."""
+    """A Tidal track plus, when already fetched, something the player can open:
+    a stream URL or a local DASH manifest."""
     track: object
     url: str = ""
-    quality: str = ""
+    quality: str = ""           # what Tidal actually sent, e.g. "FLAC 24-bit/96 kHz"
+    lossless: bool = False
+    gain_db: float = 0.0        # track ReplayGain, capped so the peak cannot clip
     fetched_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -81,6 +89,56 @@ class Match:
         return self.method
 
 
+def format_label(codec, bit_depth, sample_rate, audio_quality=""):
+    codec = (codec or "").upper()
+    if "FLAC" in codec or "ALAC" in codec:
+        name = "FLAC" if "FLAC" in codec else "ALAC"
+        if bit_depth and sample_rate:
+            return f"{name} {bit_depth}-bit/{sample_rate / 1000:g} kHz"
+        return name
+    kbps = {"HIGH": "320 kbps", "LOW": "96 kbps"}.get(str(audio_quality).split(".")[-1].upper())
+    return f"AAC {kbps}" if kbps else "AAC"
+
+
+def replaygain_db(gain, peak):
+    if not gain:
+        return 0.0
+    gain = float(gain)
+    if peak and float(peak) > 0:
+        gain = min(gain, -20 * math.log10(float(peak)))
+    return round(gain, 2)
+
+
+_stream_dir = None
+
+
+def _manifest_dir():
+    global _stream_dir
+    if _stream_dir is None:
+        _stream_dir = tempfile.mkdtemp(prefix="spotifysync-")
+        atexit.register(shutil.rmtree, _stream_dir, True)
+    return _stream_dir
+
+
+def write_manifest(track_id, manifest):
+    """Store a DASH manifest where mpv can open it; drop ones older than an
+    hour (their signed segment URLs are long dead by then)."""
+    folder = _manifest_dir()
+    now = time.time()
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        try:
+            if now - os.path.getmtime(path) > 3600:
+                os.remove(path)
+        except OSError:
+            pass
+    path = os.path.join(folder, f"{track_id}-{int(now * 1000)}.mpd")
+    data = manifest if isinstance(manifest, str) else manifest.decode("utf-8")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(data)
+    return path
+
+
 class TidalLibrary:
     def __init__(self, session=None):
         self.session = session
@@ -88,10 +146,21 @@ class TidalLibrary:
         self.auto_matches = MappingStore(MATCH_CACHE_FILE)
         self._strikes = {}          # quality -> set of track ids refused in a row
         self._disabled = set()
+        self._warned_lossy = False
+
+    @property
+    def is_pkce(self):
+        return bool(getattr(self.session, "is_pkce", False))
 
     # --- login -----------------------------------------------------------
-    def login(self, open_browser=None):
-        """Log in, preferring the cached session. Returns a LoginResult."""
+    def login(self, open_browser=None, ask_redirect=None):
+        """Log in, preferring the cached session. Returns a LoginResult.
+
+        `ask_redirect(url)` shows the PKCE login and returns the address the
+        browser ended on (None when cancelled). Tidal only streams FLAC to
+        PKCE logins; the older device login gets AAC, so a cached one is
+        offered an upgrade.
+        """
         tidalapi = _tidalapi()
         quality = preferred_quality()
         if not quality:
@@ -107,6 +176,11 @@ class TidalLibrary:
                 # tidalapi refreshes an expired access token while loading;
                 # save it so the next start does not have to again.
                 self._save_session()
+                if not self.is_pkce and ask_redirect:
+                    logger.info("Tidal: this login only gets AAC streams; "
+                                "asking for a new one for lossless")
+                    if not self.login_pkce(open_browser, ask_redirect):
+                        logger.info("Tidal: keeping the old login (AAC only)")
                 return LoginResult.OK
         except Exception as e:
             if _is_network_error(e):
@@ -115,6 +189,13 @@ class TidalLibrary:
             logger.warning(f"Cached Tidal session unusable: {e}")
 
         logger.info("Tidal: login required")
+        if ask_redirect:
+            try:
+                ok = self.login_pkce(open_browser, ask_redirect, raise_network=True)
+            except Exception as e:
+                logger.warning(f"Tidal: offline during login ({e.__class__.__name__})")
+                return LoginResult.OFFLINE
+            return LoginResult.OK if ok else LoginResult.FAILED
         try:
             result = self.session.login_oauth()
             link = result[0] if isinstance(result, (tuple, list)) else result
@@ -140,6 +221,33 @@ class TidalLibrary:
             logger.error(f"Tidal login failed: {e}")
             return LoginResult.FAILED
 
+    def login_pkce(self, open_browser, ask_redirect, raise_network=False):
+        """Browser login ending on a Tidal "Oops" page whose address the user
+        pastes back. True once logged in and saved."""
+        try:
+            url = self.session.pkce_login_url()
+            if open_browser:
+                open_browser(url)
+            redirect = ask_redirect(url)
+            if not redirect:
+                return False
+            token = self.session.pkce_get_auth_token(redirect.strip())
+            self.session.process_auth_token(token, is_pkce_token=True)
+            if not self.session.check_login():
+                logger.error("Tidal: login did not complete")
+                return False
+        except Exception as e:
+            if raise_network and _is_network_error(e):
+                raise
+            logger.error(f"Tidal login failed: {e}")
+            return False
+        self._save_session()
+        self._disabled.clear()
+        self._strikes.clear()
+        self._warned_lossy = False
+        logger.info("Tidal: logged in (lossless and hi-res available)")
+        return True
+
     def _load_cached_session(self):
         data = credentials.get_json(credentials.TIDAL_SESSION_KEY)
         if not data or not data.get("access_token"):
@@ -147,11 +255,13 @@ class TidalLibrary:
         expiry = None
         if data.get("expiry_time"):
             expiry = datetime.fromtimestamp(data["expiry_time"])
+        is_pkce = bool(data.get("is_pkce"))
         loaded = self.session.load_oauth_session(
             data.get("token_type", "Bearer"),
             data.get("access_token"),
             data.get("refresh_token"),
             expiry,
+            is_pkce=is_pkce,
         )
         if loaded is False:
             # Access token rejected outright: try the refresh token before
@@ -161,7 +271,8 @@ class TidalLibrary:
                 return False
             loaded = self.session.load_oauth_session(
                 self.session.token_type, self.session.access_token,
-                self.session.refresh_token or refresh, self.session.expiry_time)
+                self.session.refresh_token or refresh, self.session.expiry_time,
+                is_pkce=is_pkce)
         return bool(loaded) and self.session.check_login()
 
     def _save_session(self):
@@ -171,6 +282,7 @@ class TidalLibrary:
             "access_token": self.session.access_token,
             "refresh_token": self.session.refresh_token,
             "expiry_time": expiry.timestamp() if expiry else None,
+            "is_pkce": self.is_pkce,
         })
         logger.debug("Tidal: session cached")
 
@@ -326,16 +438,6 @@ class TidalLibrary:
         usable = [q for q in order if q not in self._disabled]
         return usable or order or [preferred_quality()]
 
-    def stream_url(self, track):
-        """Return (url, quality_label), or (None, None)."""
-        for quality in self._qualities():
-            url, label = self._try_quality(track, quality)
-            if url:
-                self._strikes.pop(quality, None)
-                return url, label
-        logger.error(f"Could not stream '{track.name}' at any quality")
-        return None, None
-
     def _refused(self, quality, track, label):
         strikes = self._strikes.setdefault(quality, set())
         strikes.add(getattr(track, "id", id(track)))
@@ -347,37 +449,62 @@ class TidalLibrary:
             logger.info(f"Quality {label} not available for '{track.name}'")
 
     def _try_quality(self, track, quality):
+        """A Resolved for `track` at up to `quality`, or None.
+
+        The label comes from what Tidal actually returned: asking for hi-res
+        used to be reported as hi-res while the older login got AAC.
+        """
         label = str(quality).split(".")[-1].upper()
+        try:
+            self.session.config.quality = quality
+            stream = track.get_stream()
+            manifest = stream.get_stream_manifest()
+            if getattr(stream, "is_mpd", False):
+                # PKCE logins get every format as MPEG-DASH segments.
+                url = write_manifest(track.id, stream.get_manifest_data())
+            else:
+                url = manifest.urls[0] if manifest.urls else ""
+            if url:
+                codec = getattr(manifest, "codecs", "")
+                return Resolved(
+                    track=track, url=url,
+                    quality=format_label(codec, getattr(stream, "bit_depth", 0),
+                                         getattr(stream, "sample_rate", 0),
+                                         getattr(stream, "audio_quality", "")),
+                    lossless=any(c in str(codec).upper() for c in ("FLAC", "ALAC")),
+                    gain_db=replaygain_db(getattr(stream, "track_replay_gain", 0),
+                                          getattr(stream, "track_peak_amplitude", 0)))
+        except Exception as e:
+            if "401" in str(e):
+                self._refused(quality, track, label)
+                return None
+            logger.debug(f"get_stream({label}) failed: {e}")
+
         try:
             self.session.config.quality = quality
             url = track.get_url()
             if url:
-                return url, label
+                return Resolved(track=track, url=url, quality=label)
         except Exception as e:
             if "401" in str(e):
                 self._refused(quality, track, label)
-                return None, None
-            logger.debug(f"get_url({label}) failed: {e}")
-
-        try:
-            self.session.config.quality = quality
-            stream = track.get_stream()
-            # MPEG-DASH manifests are segment lists VLC cannot play directly.
-            if getattr(stream, "is_mpd", False):
-                return None, None
-            manifest = stream.get_stream_manifest()
-            if manifest.urls:
-                return manifest.urls[0], str(stream.audio_quality).split(".")[-1].upper()
-        except Exception as e:
-            logger.debug(f"get_stream({label}) failed: {e}")
-        return None, None
+            else:
+                logger.debug(f"get_url({label}) failed: {e}")
+        return None
 
     def resolve(self, track):
-        """Match plus stream URL, ready to hand straight to VLC."""
-        url, quality = self.stream_url(track)
-        if not url:
-            return None
-        return Resolved(track=track, url=url, quality=quality)
+        """Match plus a playable stream, ready to hand straight to the player."""
+        for quality in self._qualities():
+            resolved = self._try_quality(track, quality)
+            if resolved:
+                self._strikes.pop(quality, None)
+                if not resolved.lossless and not self._warned_lossy and not self.is_pkce:
+                    self._warned_lossy = True
+                    logger.warning("Tidal only streams AAC (lossy) to this login; "
+                                   "log in again (Settings > Tidal) for FLAC and hi-res")
+                return resolved
+        logger.error(f"Could not stream '{track.name}' at any quality")
+        return None
 
     def favorite(self, track_id):
         for attempt in (lambda: self.session.user.favorites.add_track(track_id),
@@ -431,6 +558,10 @@ class Prefetcher:
         self._cache = {}
         self._busy = False
         self._next_keys = ()
+
+    def clear(self):
+        with self._lock:
+            self._cache = {}
 
     def get(self, *keys):
         with self._lock:

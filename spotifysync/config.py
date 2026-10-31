@@ -111,6 +111,9 @@ DEFAULT_SETTINGS = {
     "last_device_id": None,
     "volume": 100,
     "spotify_device_id": None,
+    "audio_exclusive": True,    # Windows: WASAPI exclusive, bit-perfect
+    "force_rate": True,         # Linux: PipeWire runs at the track's rate
+    "replaygain": False,        # changes samples, so off for bit-perfect
 }
 
 

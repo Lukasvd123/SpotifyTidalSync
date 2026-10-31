@@ -10,7 +10,12 @@ from tkinter import messagebox
 
 from .config import APPDATA_DIR, IS_MACOS, IS_WINDOWS, logger, setup_logging
 
-VLC_URL = "https://www.videolan.org/vlc/"
+LIBMPV_HINT = (
+    "libmpv is required for playback. "
+    + ("It ships with SpotifySync.exe; if you run from source, run build_windows.bat once."
+       if IS_WINDOWS else
+       "Install it with your package manager, e.g. 'sudo dnf install mpv-libs' (Fedora) "
+       "or 'sudo apt install libmpv2' (Debian/Ubuntu)."))
 
 
 _LOCK_OFFSET = 4096
@@ -108,13 +113,10 @@ def main():
     except Exception as e:
         logger.exception("Startup failed")
         hint = ""
-        # python-vlc fails in several ways when libvlc is missing or the wrong
-        # architecture: ImportError, OSError, NameError, NotImplementedError.
-        if "vlc" in repr(e).lower() or isinstance(
-                e, (ImportError, OSError, NameError, NotImplementedError)):
-            bits = "64-bit " if platform.machine().endswith("64") else ""
-            hint = (f"\n\nVLC media player ({bits}desktop version) is required for playback. "
-                    f"Install it from {VLC_URL} and start the app again.")
+        # python-mpv raises OSError when libmpv is missing or the wrong
+        # architecture.
+        if "mpv" in repr(e).lower() or isinstance(e, (ImportError, OSError)):
+            hint = "\n\n" + LIBMPV_HINT
         _error_dialog(f"Could not start: {e}{hint}")
         return 1
 
@@ -129,6 +131,7 @@ def main():
     engine.on_update = app.update_snapshot
     engine.on_match_needed = app.request_match
     engine.open_browser = app.open_browser
+    engine.ask_tidal_login = app.ask_tidal_login
 
     engine.start_background()
     app.mainloop()

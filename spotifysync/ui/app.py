@@ -12,6 +12,7 @@ from PIL import Image, ImageTk
 from ..config import UI_FONT, load_settings, logger, resource_path
 from .manual_match import ManualMatchWindow
 from .settings_window import SettingsWindow
+from .tidal_login import ask_blocking
 from .theme import (ACCENT, BG, BUTTON_STYLE, DIM, MUTED, TEXT, apply_dark_title_bar,
                     open_browser, scaled)
 
@@ -172,8 +173,15 @@ class MainApp(tk.Tk):
         self.source_label.config(text="  |  ".join(parts))
 
         quality = snapshot["quality"]
-        self.quality_label.config(
-            text=f"Quality: {quality.replace('_', ' ').title()}" if quality else "")
+        if not quality:
+            text = ""
+        elif snapshot.get("bit_perfect"):
+            text = f"{quality}  ·  bit-perfect"
+        elif snapshot.get("lossless"):
+            text = quality
+        else:
+            text = f"{quality} (lossy)  ·  Settings > Tidal to get FLAC"
+        self.quality_label.config(text=text)
         match = snapshot.get("match")
         self.match_label.config(text=f"Matched by {match}" if match else "")
         if snapshot.get("low_confidence"):
@@ -275,6 +283,10 @@ class MainApp(tk.Tk):
 
     def open_browser(self, url):
         self.after(0, lambda: open_browser(url, self))
+
+    def ask_tidal_login(self, url):
+        """Called from the sync thread; blocks it until the dialog closes."""
+        return ask_blocking(self, url)
 
     def on_close(self):
         self.engine.shutdown()

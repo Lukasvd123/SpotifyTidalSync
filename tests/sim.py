@@ -322,7 +322,7 @@ class FakeVLC:
             elif self.position >= self.duration:
                 self.state = "ended"
 
-    def play_url(self, url, start_ms=0):
+    def play_url(self, url, start_ms=0, gain_db=0.0):
         gapless = (start_ms <= 0 and url == self.standby_url
                    and self.clock() >= self._standby_ready_at)
         self.plays.append((self.clock(), url, start_ms, gapless))
@@ -336,7 +336,7 @@ class FakeVLC:
             self.state = "loading"
             self._loading = self.buffer_s
 
-    def preload(self, url):
+    def preload(self, url, gain_db=0.0):
         if url != self.standby_url:
             self.standby_url = url
             self._standby_ready_at = self.clock() + self.buffer_s
@@ -387,6 +387,9 @@ class FakeVLC:
 
     def finished(self):
         return self.state in ("ended", "error")
+
+    def output_info(self):
+        return {"bit_perfect": self.volume == 100}
 
     def seek(self, ms):
         self.seeks.append((self.clock(), int(ms)))
@@ -447,7 +450,7 @@ class FakeLibrary:
             ms = tidal_ms.get(t.title, t.duration_ms)
             self.catalogue[t.title] = TidalTrack(id=5000 + i, name=t.title, duration=ms / 1000)
 
-    def login(self, open_browser=None):
+    def login(self, open_browser=None, ask_redirect=None):
         return "ok"
 
     def is_not_on_tidal(self, query, spotify_id=None):

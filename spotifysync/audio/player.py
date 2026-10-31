@@ -1,140 +1,212 @@
-"""VLC playback wrapper."""
+"""Audio output through libmpv.
+
+libmpv plays Tidal's MPEG-DASH lossless and hi-res streams (VLC 3 could not),
+keeps a clock that matches the audio (libvlc's lagged up to 13s by the end of
+a Tidal MP4 stream), and outputs samples untouched at volume 100: on Windows
+through exclusive WASAPI, on Linux with the PipeWire graph forced to the
+track's rate.
+"""
 
 import os
 import subprocess
 import threading
 import time
 
-import vlc
+import mpv
 
-from ..config import IS_LINUX, load_settings, logger, save_setting
-from .vlcenv import build_vlc_args
+from ..config import IS_LINUX, IS_WINDOWS, load_settings, logger, save_setting
 
-_STATUS = {
-    vlc.State.NothingSpecial: "idle",
-    vlc.State.Opening: "loading",
-    vlc.State.Buffering: "loading",
-    vlc.State.Playing: "playing",
-    vlc.State.Paused: "paused",
-    vlc.State.Stopped: "idle",
-    vlc.State.Ended: "ended",
-    vlc.State.Error: "error",
-}
+# The DASH demuxer opens a local manifest and fetches its segments over https;
+# ffmpeg refuses that mix unless the protocols are allowed explicitly.
+_PROTOCOLS = "protocol_whitelist=[file,http,https,tls,tcp,crypto,data]"
+
+# Stream properties libpipewire reads from the environment when mpv opens its
+# stream: force the graph (and the DAC) to the track's rate.
+_PIPEWIRE_PROPS = "{ node.force-rate = 0 media.role = Music }"
+
+
+def _audio_output():
+    if IS_WINDOWS:
+        return "wasapi"
+    if IS_LINUX:
+        return "pipewire,pulse,alsa"
+    return ""
 
 
 class AudioPlayer:
-    """Two libvlc players: the active one, and a standby that can pre-buffer
-    the next track so the switch at a boundary is instant."""
+    """One mpv core. The next track is pre-buffered as the next playlist entry
+    (mpv prefetches it), and `keep-open=always` stops mpv advancing on its own:
+    the engine decides when a track is over."""
 
-    def __init__(self, extra_args=()):
-        args = build_vlc_args() + list(extra_args)
-        self.instance = vlc.Instance(*args)
-        if self.instance is None:
-            raise RuntimeError("libvlc failed to initialise")
-        self.player = self.instance.media_player_new()
-        self._standby = self.instance.media_player_new()
-        self._standby_url = None
-
+    def __init__(self, **overrides):
         settings = load_settings()
         self.volume = int(settings.get("volume", 100))
-        self._apply_volume()
+        self.replaygain = bool(settings.get("replaygain", False))
+        self.exclusive = IS_WINDOWS and bool(settings.get("audio_exclusive", True))
+        self.force_rate = IS_LINUX and bool(settings.get("force_rate", True))
+        if self.force_rate:
+            # Without this the track is resampled to whatever rate other
+            # apps' streams hold the device at.
+            os.environ["PIPEWIRE_PROPS"] = _PIPEWIRE_PROPS
+
+        options = dict(
+            video=False, vo="null", ao=_audio_output(), idle=True,
+            keep_open="always", prefetch_playlist=True, gapless_audio=True,
+            cache=True, demuxer_max_bytes="64MiB", demuxer_lavf_o=_PROTOCOLS,
+            volume=self.volume, volume_max=100, replaygain="no",
+            audio_exclusive=self.exclusive, audio_client_name="SpotifyTidalSync",
+            input_default_bindings=False, input_vo_keyboard=False,
+            terminal=False, config=False, ytdl=False,
+        )
+        options.update(overrides)
+        self._mpv = mpv.MPV(**{k: v for k, v in options.items() if v != ""})
+        self._lock = threading.Lock()
+        self._current_id = None     # mpv playlist entry id of what we play
+        self._failed = set()        # entry ids that ended in an error
+        self._preloaded = None      # (url, entry id) queued after the current one
+        self._mpv.event_callback("end-file")(self._on_end_file)
 
         self._device = settings.get("last_device_id")
         if self._device:
-            threading.Timer(1.0, lambda: self.set_device(self._device, save=False)).start()
-        logger.debug(f"AudioPlayer initialised: {args}")
+            self.set_device(self._device, save=False)
+        logger.debug(f"AudioPlayer: mpv {self._mpv.mpv_version}, ao={options['ao'] or 'auto'}, "
+                     f"exclusive={self.exclusive}, force_rate={self.force_rate}")
 
-    def _apply_volume(self):
-        for player in (self.player, self._standby):
-            try:
-                player.audio_set_volume(self.volume)
-            except Exception:
-                pass
+    def _on_end_file(self, event):
+        data = getattr(event, "data", None)
+        if getattr(data, "reason", None) == mpv.MpvEventEndFile.ERROR:
+            self._failed.add(data.playlist_entry_id)
+            logger.debug(f"mpv end-file error {data.error} for entry {data.playlist_entry_id}")
 
+    def _load(self, url, mode, options):
+        encoded = ",".join(f"{k}={v}" for k, v in options.items())
+        result = self._mpv.command("loadfile", url, mode, -1, encoded)
+        return (result or {}).get("playlist_entry_id")
+
+    def _get(self, name, default=None):
+        try:
+            value = getattr(self._mpv, name)
+        except Exception:
+            return default
+        return default if value is None else value
+
+    # --- volume ----------------------------------------------------------
     def set_volume(self, level):
         self.volume = max(0, min(100, int(level)))
-        self._apply_volume()
+        self._mpv.volume = self.volume
         save_setting("volume", self.volume)
+
+    def set_replaygain(self, enabled):
+        """Applied from the next track on."""
+        self.replaygain = bool(enabled)
+        save_setting("replaygain", self.replaygain)
+
+    def set_output_mode(self, exclusive=None, force_rate=None):
+        """Change how the device is opened; reopens it (a short dropout)."""
+        if exclusive is not None and IS_WINDOWS:
+            self.exclusive = bool(exclusive)
+            save_setting("audio_exclusive", self.exclusive)
+            self._mpv.audio_exclusive = self.exclusive
+        if force_rate is not None and IS_LINUX:
+            self.force_rate = bool(force_rate)
+            save_setting("force_rate", self.force_rate)
+            if self.force_rate:
+                os.environ["PIPEWIRE_PROPS"] = _PIPEWIRE_PROPS
+            else:
+                os.environ.pop("PIPEWIRE_PROPS", None)
+        try:
+            self._mpv.command("ao-reload")
+        except Exception as e:
+            logger.debug(f"ao-reload failed: {e}")
+
+    def _file_options(self, gain_db):
+        options = {}
+        if self.replaygain and gain_db:
+            options["volume-gain"] = f"{gain_db:.2f}"
+        return options
 
     # --- devices ---------------------------------------------------------
     def get_audio_devices(self):
         devices = []
-        try:
-            mods = self.player.audio_output_device_enum()
-            if not mods:
-                return devices
-            node, guard = mods, 0
-            while node and guard < 100:
-                node = node.contents
-                desc = node.description.decode("utf-8", "ignore") if node.description else "Unknown"
-                dev_id = node.device.decode("utf-8", "ignore") if node.device else None
-                if dev_id:
-                    devices.append((desc, dev_id))
-                node = node.next
-                guard += 1
-            vlc.libvlc_audio_output_device_list_release(mods)
-        except Exception as e:
-            logger.error(f"Error listing audio devices: {e}")
+        for entry in self._get("audio_device_list", []):
+            name = entry.get("name")
+            if name and name != "auto":
+                devices.append((entry.get("description") or name, name))
         return devices
 
+    def _resolve_device(self, device_id):
+        """Map a saved id to mpv's. VLC saved bare ids ("alsa_output.usb-..."),
+        mpv prefixes the backend ("pipewire/alsa_output.usb-...")."""
+        names = [name for _, name in self.get_audio_devices()]
+        if device_id in names:
+            return device_id
+        for name in names:
+            if name.split("/", 1)[-1] == device_id:
+                return name
+        return None
+
     def set_device(self, device_id, save=True):
-        self._device = device_id
-        for player in (self.player, self._standby):
-            try:
-                player.audio_output_device_set(None, device_id)
-            except Exception as e:
-                logger.debug(f"set_device failed: {e}")
+        resolved = self._resolve_device(device_id) if device_id else None
+        if device_id and resolved is None:
+            logger.debug(f"Audio device '{device_id}' not found; using the default")
+        self._device = resolved or device_id
+        try:
+            self._mpv.audio_device = resolved or "auto"
+        except Exception as e:
+            logger.debug(f"set_device failed: {e}")
         if save:
-            save_setting("last_device_id", device_id)
+            save_setting("last_device_id", self._device)
 
     # --- transport -------------------------------------------------------
-    def play_url(self, url, start_ms=0):
-        """Start a stream, optionally part-way in.
+    def play_url(self, url, start_ms=0, gain_db=0.0):
+        """Start a stream (URL or local DASH manifest), optionally part-way in.
 
-        A mid-song start is passed to VLC as the media's start time. Starting at
-        0 and seeking once playback began made the first fraction of a second
-        audible and forced a second buffer: the jump at the start of a song.
+        The start position is a per-file option, so mpv opens the stream there
+        instead of playing from 0 and seeking: no jump at the start of a song.
         """
-        if start_ms <= 0 and url and url == self._standby_url and self._standby_ready():
-            self._swap_in_standby()
-            return
-
-        media = self.instance.media_new(url)
-        if start_ms > 0:
-            media.add_option(f":start-time={start_ms / 1000.0:.3f}")
-        self.player.set_media(media)
-        self.player.play()
-        self._apply_volume()
+        with self._lock:
+            preloaded, self._preloaded = self._preloaded, None
+            if (start_ms <= 0 and url and preloaded and preloaded[0] == url
+                    and self._has_next()):
+                self._mpv.command("playlist-next", "force")
+                self._current_id = preloaded[1]
+                self._drop_finished()
+                logger.debug("Started pre-buffered track")
+            else:
+                options = self._file_options(gain_db)
+                if start_ms > 0:
+                    options["start"] = f"{start_ms / 1000.0:.3f}"
+                self._current_id = self._load(url, "replace", options)
+            self._mpv.pause = False
         self._after_start()
 
-    def preload(self, url):
-        """Buffer `url` in the standby player, paused at the first frame."""
-        if not url or url == self._standby_url:
+    def _has_next(self):
+        return self._get("playlist_count", 0) > self._get("playlist_pos", -1) + 1
+
+    def _drop_finished(self):
+        try:
+            while self._get("playlist_pos", 0) > 0:
+                self._mpv.command("playlist-remove", 0)
+        except Exception as e:
+            logger.debug(f"playlist cleanup failed: {e}")
+
+    def preload(self, url, gain_db=0.0):
+        """Queue `url` as the next entry; mpv buffers it ahead of the switch."""
+        if not url or (self._preloaded and self._preloaded[0] == url):
             return
-        media = self.instance.media_new(url)
-        media.add_option(":start-paused")
-        self._standby.set_media(media)
-        self._standby.play()
-        self._standby_url = url
+        with self._lock:
+            if self._current_id is None:
+                return
+            self._mpv.command("playlist-clear")
+            entry = self._load(url, "append", self._file_options(gain_db))
+            self._preloaded = (url, entry)
         logger.debug("Pre-buffering next track")
 
-    def _standby_ready(self):
-        return _STATUS.get(self._standby.get_state()) in ("paused", "playing")
-
-    def _swap_in_standby(self):
-        old = self.player
-        self.player, self._standby = self._standby, old
-        self._standby_url = None
-        self._apply_volume()
-        self.player.set_pause(0)
-        old.stop()
-        logger.debug("Started pre-buffered track")
-        self._after_start()
-
     def clear_preload(self):
-        if self._standby_url:
-            self._standby.stop()
-            self._standby_url = None
+        with self._lock:
+            if self._preloaded:
+                self._mpv.command("playlist-clear")
+                self._preloaded = None
 
     def _after_start(self):
         if IS_LINUX:
@@ -144,29 +216,44 @@ class AudioPlayer:
                 threading.Timer(delay, self._unmute_own_stream).start()
 
     def pause(self):
-        self.player.set_pause(1)
+        self._mpv.pause = True
 
     def resume(self):
-        self.player.set_pause(0)
+        if self.status() != "ended":
+            self._mpv.pause = False
 
     def stop(self):
-        self.player.stop()
+        with self._lock:
+            self._mpv.command("stop")
+            self._current_id = None
+            self._preloaded = None
 
     def is_playing(self):
-        return bool(self.player.is_playing())
+        return self.status() == "playing"
 
     def status(self):
         """idle | loading | playing | paused | ended | error"""
-        try:
-            return _STATUS.get(self.player.get_state(), "idle")
-        except Exception:
+        if self._current_id is None:
+            return "idle"
+        if self._current_id in self._failed:
             return "error"
+        if self._get("idle_active", False):
+            return "idle"
+        if self._get("eof_reached", False):
+            return "ended"
+        if self._get("pause", False):
+            return "paused"
+        if self._get("core_idle", True) or self._get("time_pos") is None:
+            return "loading"
+        return "playing"
 
     def position_ms(self):
-        return self.player.get_time()
+        pos = self._get("time_pos")
+        return -1 if pos is None or self._current_id is None else int(pos * 1000)
 
     def duration_ms(self):
-        return self.player.get_length()
+        duration = self._get("duration")
+        return -1 if duration is None or self._current_id is None else int(duration * 1000)
 
     def has_track(self):
         return self.duration_ms() > 0
@@ -179,34 +266,68 @@ class AudioPlayer:
         return max(0, duration - position)
 
     def finished(self):
-        """True once the stream has stopped producing audio.
-
-        Checked via VLC state rather than time arithmetic: at end-of-stream
-        get_time() and get_length() both return -1.
-        """
         return self.status() in ("ended", "error")
 
     def seek(self, position_ms):
-        self.player.set_time(int(max(0, position_ms)))
+        try:
+            self._mpv.seek(max(0, position_ms) / 1000.0, "absolute+exact")
+        except Exception as e:
+            logger.debug(f"seek failed: {e}")
 
     def wait_until_playing(self, timeout=6.0):
-        """Block until VLC starts; Tidal streams take a few seconds to buffer."""
+        """Block until audio runs; Tidal streams take a moment to buffer."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             state = self.status()
             if state == "playing":
+                self._check_output()
                 return True
             if state == "error":
                 return False
             time.sleep(0.05)
         return self.is_playing()
 
+    def _check_output(self):
+        """mpv keeps playing silently when it cannot open the audio device.
+        Exclusive mode fails that way while another app holds the device
+        exclusively; fall back to shared mode rather than play nothing."""
+        if self._get("current_ao") or not self.exclusive:
+            return
+        logger.warning("Could not open the audio device exclusively; using shared mode")
+        self.exclusive = False
+        try:
+            self._mpv.audio_exclusive = False
+            self._mpv.command("ao-reload")
+        except Exception as e:
+            logger.debug(f"ao-reload failed: {e}")
+
+    def output_info(self):
+        """What reaches the device: the source format, mpv's output format, and
+        whether nothing in between changes a sample."""
+        source = self._get("audio_params", {}) or {}
+        out = self._get("audio_out_params", {}) or {}
+        untouched = (bool(source) and source.get("samplerate") == out.get("samplerate")
+                     and source.get("format") == out.get("format")
+                     and self.volume == 100 and not self.replaygain)
+        # Untouched by mpv is only bit-perfect if the system mixer does not
+        # resample or mix it either: exclusive WASAPI, or a PipeWire graph
+        # forced to the track's rate.
+        bit_perfect = untouched and (self.exclusive and bool(self._get("current_ao"))
+                                     or self.force_rate)
+        return {"source": source, "output": out, "bit_perfect": bit_perfect}
+
+    def shutdown(self):
+        try:
+            self._mpv.terminate()
+        except Exception:
+            pass
+
     # --- linux self-unmute -----------------------------------------------
     def _unmute_own_stream(self):
         """Unmute our own sink-inputs, identified by PID only.
 
-        Matching on "vlc" in the name also grabbed the user's own VLC, and
-        forcing 100% volume overrode whatever they set in the mixer.
+        Matching by name also grabbed other players, and forcing 100% volume
+        overrode whatever the user set in the mixer.
         """
         our_pid = str(os.getpid())
         try:
@@ -238,4 +359,4 @@ class AudioPlayer:
                         is_ours = True
             apply()
         except Exception as e:
-            logger.debug(f"VLC self-unmute error: {e}")
+            logger.debug(f"Self-unmute error: {e}")

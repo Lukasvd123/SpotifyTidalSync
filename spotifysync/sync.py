@@ -63,6 +63,9 @@ class SyncEngine:
         self.on_update = on_update
         self.on_match_needed = on_match_needed
         self.open_browser = open_browser
+        # ask_tidal_login(url) -> address the browser ended on, or None. Set by
+        # the UI; blocks the sync loop while the dialog is open.
+        self.ask_tidal_login = None
         self.clock = clock
         self._sleep = sleep
 
@@ -96,6 +99,7 @@ class SyncEngine:
         self.current = EMPTY
         self.current_track = None
         self.current_quality = ""
+        self.current_lossless = False
         self.match_label = ""
         self.match_score = 0.0
         self.art_url = ""
@@ -151,7 +155,8 @@ class SyncEngine:
         while self.running:
             self.status = "Logging in to Tidal..."
             self._publish()
-            result = self.library.login(open_browser=self.open_browser)
+            result = self.library.login(open_browser=self.open_browser,
+                                        ask_redirect=self.ask_tidal_login)
             if result == LoginResult.OK:
                 return True
             if result == LoginResult.FAILED:
@@ -378,7 +383,7 @@ class SyncEngine:
             self.source.pause()
         try:
             start = 0 if from_start else self._start_position(src)
-            self.player.play_url(resolved.url, start_ms=start)
+            self.player.play_url(resolved.url, start_ms=start, gain_db=resolved.gain_db)
             if not self.player.wait_until_playing(timeout=6.0):
                 raise RuntimeError(f"'{resolved.track.name}' did not start")
 
@@ -389,6 +394,7 @@ class SyncEngine:
 
             self.current_track = resolved.track
             self.current_quality = resolved.quality
+            self.current_lossless = resolved.lossless
             self.match_label = match.label if match else ""
             self.match_score = match.score if match else 0.0
             self.state = State.PLAYING
@@ -446,6 +452,7 @@ class SyncEngine:
         self.player.clear_preload()
         self.current_track = None
         self.current_quality = ""
+        self.current_lossless = False
         self.match_label = ""
         if self.source.paused_by_us:
             self.source.resume()
@@ -475,16 +482,22 @@ class SyncEngine:
         logger.warning(f"Stream dropped at {position}ms; reconnecting "
                        f"(attempt {self._recoveries}/{MAX_RECOVERIES})")
         self.status = "Reconnecting..."
+        self._reopen(src, position)
+
+    def _reopen(self, src, position):
+        """Open a fresh stream of the current track at `position`."""
         resolved = None
         if self.library.ensure_session():
             resolved = self.library.resolve(self.current_track)
         if resolved is None:
             self._fallback(src, "Tidal stream failed", popup=False)
             return
-        self.player.play_url(resolved.url, start_ms=position)
+        self.player.play_url(resolved.url, start_ms=position, gain_db=resolved.gain_db)
         self.player.wait_until_playing(timeout=6.0)
         self._suppress_seek_until = self.clock() + SEEK_SUPPRESS_S
         self._seek_candidate = None
+        self.current_quality = resolved.quality
+        self.current_lossless = resolved.lossless
         if self.player.status() == "playing":
             self.status = f"Playing: {self.current_track.name} [{resolved.quality}]"
 
@@ -521,6 +534,7 @@ class SyncEngine:
             self.player.clear_preload()
             self.current_track = None
             self.current_quality = ""
+            self.current_lossless = False
             self.current = EMPTY
             self._reset_track_state()
             if self.source.paused_by_us:
@@ -544,6 +558,7 @@ class SyncEngine:
             self.player.clear_preload()
             self.current_track = None
             self.current_quality = ""
+            self.current_lossless = False
             self.current = EMPTY
             self._reset_track_state()
             # Never send pause/resume to another device.
@@ -643,7 +658,7 @@ class SyncEngine:
         if remaining <= PREBUFFER_MS:
             entry = self.prefetch.next_up
             if entry is not None and entry.url_fresh:
-                self.player.preload(entry.url)
+                self.player.preload(entry.url, gain_db=entry.gain_db)
 
     def _remember(self, src):
         previous = self._last_reading
@@ -744,6 +759,26 @@ class SyncEngine:
         if same_track(src, self.current) and self.state != State.FALLBACK:
             self._fallback(src, "Not on Tidal", popup=False)
 
+    def set_output_mode(self, **options):
+        self._submit(lambda: self.player.set_output_mode(**options))
+
+    def set_replaygain(self, enabled):
+        self._submit(self.player.set_replaygain, enabled)
+
+    def tidal_login(self):
+        """Log in to Tidal again (PKCE), e.g. to upgrade from AAC to FLAC."""
+        self._submit(self._tidal_login)
+
+    def _tidal_login(self):
+        if not self.ask_tidal_login:
+            return
+        if not self.library.login_pkce(self.open_browser, self.ask_tidal_login):
+            return
+        self.prefetch.clear()
+        if self.state == State.PLAYING and self.current_track is not None:
+            # Reopen the current song in the new quality where it is now.
+            self._reopen(self.current, max(0, self.player.position_ms()))
+
     def search_tidal(self, query, limit=20):
         return self.library.search(query, limit=limit)
 
@@ -787,9 +822,19 @@ class SyncEngine:
             "source_app": self.current.app_name,
             "api": self.source.api_available,
             "quality": self.current_quality,
+            "lossless": self.current_lossless,
+            "bit_perfect": self._bit_perfect(),
             "match": self.match_label,
             "low_confidence": low_confidence,
         }
+
+    def _bit_perfect(self):
+        if self.state != State.PLAYING or not self.current_lossless:
+            return False
+        try:
+            return bool(self.player.output_info()["bit_perfect"])
+        except Exception:
+            return False
 
     def shutdown(self):
         self.running = False

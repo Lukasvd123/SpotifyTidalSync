@@ -138,7 +138,7 @@ def test_TD9_rejected_access_token_is_refreshed_before_relogin(library, monkeypa
     monkeypatch.setattr(credentials, "set_json", lambda key, data: saved.update(data))
     calls = []
 
-    def load(token_type, access, refresh, expiry):
+    def load(token_type, access, refresh, expiry, is_pkce=False):
         calls.append(access)
         return access == "new"
 
@@ -153,3 +153,95 @@ def test_TD9_rejected_access_token_is_refreshed_before_relogin(library, monkeypa
     assert lib.login() == tidal.LoginResult.OK
     assert calls == ["old", "new"]
     assert saved["access_token"] == "new"
+
+
+class DashStream:
+    is_mpd = True
+    bit_depth, sample_rate, audio_quality = 24, 96000, "HI_RES_LOSSLESS"
+    track_replay_gain, track_peak_amplitude = 6.0, 0.9
+
+    def get_stream_manifest(self):
+        return NS(codecs="FLAC", urls=["https://seg/1.mp4"])
+
+    def get_manifest_data(self):
+        return "<MPD/>"
+
+
+def test_TD10_dash_stream_is_written_as_a_manifest_with_its_real_format(library):
+    track = FakeTrack(1, "Song")
+    track.get_stream = DashStream
+    resolved = library([track]).resolve(track)
+    assert resolved.url.endswith(".mpd")
+    with open(resolved.url, encoding="utf-8") as f:
+        assert f.read() == "<MPD/>"
+    assert resolved.quality == "FLAC 24-bit/96 kHz" and resolved.lossless
+    # +6 dB would push a 0.9 peak past full scale: capped at ~0.92 dB.
+    assert resolved.gain_db == pytest.approx(0.92, abs=0.01)
+
+
+def test_TD11_lossy_stream_is_labelled_as_what_it_is(library):
+    """debug.log said HI_RES_LOSSLESS while Tidal sent AAC to the old login."""
+    track = FakeTrack(1, "Song")
+    track.get_stream = lambda: NS(is_mpd=False, bit_depth=16, sample_rate=44100,
+                                  audio_quality="HIGH", track_replay_gain=None,
+                                  track_peak_amplitude=None,
+                                  get_stream_manifest=lambda: NS(codecs="MP4A", urls=["https://a.mp4"]))
+    resolved = library([track]).resolve(track)
+    assert resolved.quality == "AAC 320 kbps" and not resolved.lossless
+    assert resolved.url == "https://a.mp4"
+
+
+@pytest.mark.parametrize("codec,bits,rate,expected", [
+    ("flac", 16, 44100, "FLAC 16-bit/44.1 kHz"),
+    ("FLAC", 24, 192000, "FLAC 24-bit/192 kHz"),
+    ("mp4a.40.2", 16, 44100, "AAC"),
+])
+def test_TD12_format_labels(codec, bits, rate, expected):
+    assert tidal.format_label(codec, bits, rate) == expected
+
+
+def _pkce_session(lib, saved, monkeypatch, old_pkce=False):
+    monkeypatch.setattr(credentials, "get_json",
+                        lambda key: {"access_token": "old", "refresh_token": "r", "is_pkce": old_pkce})
+    monkeypatch.setattr(credentials, "set_json", lambda key, data: saved.update(data))
+    sess = lib.session
+    sess.is_pkce = False
+
+    def load(token_type, access, refresh, expiry, is_pkce=False):
+        sess.is_pkce = is_pkce
+        return True
+
+    def process(token, is_pkce_token=True):
+        sess.is_pkce = is_pkce_token
+        sess.access_token = token["access_token"]
+
+    sess.load_oauth_session = load
+    sess.check_login = lambda: True
+    sess.pkce_login_url = lambda: "https://login.tidal.com/authorize?x"
+    sess.pkce_get_auth_token = lambda url: {"access_token": "pkce"} if "code=" in url else 1 / 0
+    sess.process_auth_token = process
+    sess.token_type, sess.access_token, sess.refresh_token, sess.expiry_time = "Bearer", "old", "r", None
+    return sess
+
+
+def test_TD13_old_login_is_offered_the_lossless_upgrade(library, monkeypatch):
+    lib, saved, asked = library([]), {}, []
+    sess = _pkce_session(lib, saved, monkeypatch)
+    ask = lambda url: asked.append(url) or "https://tidal.com/android/login/auth?code=abc"
+    assert lib.login(ask_redirect=ask) == tidal.LoginResult.OK
+    assert asked and sess.is_pkce
+    assert saved["access_token"] == "pkce" and saved["is_pkce"] is True
+
+
+def test_TD14_cancelled_upgrade_keeps_the_old_login(library, monkeypatch):
+    lib, saved = library([]), {}
+    sess = _pkce_session(lib, saved, monkeypatch)
+    assert lib.login(ask_redirect=lambda url: None) == tidal.LoginResult.OK
+    assert not sess.is_pkce and saved["access_token"] == "old"
+
+
+def test_TD15_pkce_login_is_not_asked_again(library, monkeypatch):
+    lib, saved = library([]), {}
+    _pkce_session(lib, saved, monkeypatch, old_pkce=True)
+    assert lib.login(ask_redirect=lambda url: 1 / 0) == tidal.LoginResult.OK
+    assert lib.is_pkce
