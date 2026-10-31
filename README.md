@@ -2,8 +2,31 @@
 
 Use Spotify for discovery, queues and the AI DJ, and hear Tidal's lossless and
 hi-res streams instead. Spotify keeps playing **muted** as the queue master;
-the app finds each track on Tidal and plays it through VLC, following Spotify's
-pauses, seeks and skips.
+the app finds each track on Tidal and plays it through libmpv, following
+Spotify's pauses, seeks and skips.
+
+## Install
+
+Download from [Releases](https://github.com/Lukasvd123/SpotifyTidalSync/releases/latest):
+
+| | File |
+|---|---|
+| Windows 10/11 | `SpotifySync.exe` |
+| Any Linux | `SpotifySync-x86_64.AppImage` (`chmod +x`, run) |
+| Debian, Ubuntu 22.04+ | `spotifysync_<version>_amd64.deb` (`sudo apt install ./spotifysync_*.deb`) |
+| Fedora | `spotifysync-<version>.x86_64.rpm` (`sudo dnf install ./spotifysync-*.rpm`) |
+
+The .exe is not code-signed, so SmartScreen may warn on first start (More info >
+Run anyway). Every file is listed in `SHA256SUMS`, and GitHub attests which
+workflow run and commit built it:
+
+```bash
+gh attestation verify SpotifySync.exe -R Lukasvd123/SpotifyTidalSync
+```
+
+The app checks for new releases daily. The .exe and AppImage update themselves
+after verifying the download's checksum; deb and rpm installs show where to get
+the new package.
 
 ## Platform support
 
@@ -36,8 +59,12 @@ pauses, seeks and skips.
   Spotify from then on without asking. Corrections are saved permanently.
 * **Podcasts, ads and AI DJ commentary** are handed back to Spotify.
 * **Playback on another device** (phone, speaker) is left alone.
-* **Hi-res when available.** One track without a hi-res master no longer
-  downgrades the rest of the session.
+* **Real lossless and hi-res, bit-perfect.** FLAC up to 24-bit/192 kHz from
+  Tidal's DASH streams. On Windows the device is opened exclusively; on Linux
+  PipeWire switches to each track's sample rate. The window shows what Tidal
+  actually sent ("FLAC 24-bit/96 kHz · bit-perfect"). Bit-perfect needs the app
+  volume at 100 and ReplayGain off (both defaults).
+* **Optional ReplayGain** from Tidal's track gain, never clipping.
 * **App volume slider**, seek bar, ±10s, previous/next, keyboard shortcuts
   (space, ←/→, Ctrl+←/→).
 * **Safe muting.** A crash or kill never leaves Spotify muted: the next start
@@ -46,9 +73,9 @@ pauses, seeks and skips.
 
 ## Requirements
 
-* **VLC media player**, desktop version, same architecture as Python (64-bit).
-  [Download](https://www.videolan.org/vlc/)
-* **Tidal HiFi** (or HiFi Plus for hi-res).
+* **Tidal** subscription (lossless and hi-res are included in current plans).
+* From source only: **libmpv** (`sudo dnf install mpv-libs`, `sudo apt install
+  libmpv2`; on Windows `python scripts/build_app.py libmpv` fetches it).
 * **Python 3.10+** when running from source.
 * Optional: **Spotify Premium** and a Spotify developer app for the Web API
   (queue prefetch, gapless switches, ISRC matching, AI DJ, device detection).
@@ -69,7 +96,15 @@ scripts/install_desktop.sh                    # app menu entry, runs from source
 # or: scripts/build_linux.sh                  # standalone binary
 ```
 
-On first start a browser opens for the Tidal login.
+On first start a browser opens for the Tidal login. Log in; you end on a page
+saying "Oops". Paste that page's address into the app. (Tidal only streams FLAC
+to this kind of login; logins from older versions are offered the upgrade, or
+use Settings > Tidal & Quality.)
+
+### Building packages
+
+`python scripts/build_app.py windows|appimage|deb|rpm` writes to `dist/`.
+Pushing a tag `v<version>` makes CI build, self-test and publish all of them.
 
 ### Optional: Spotify Web API
 
@@ -83,7 +118,7 @@ On first start a browser opens for the Tidal login.
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests               # unit, scenario simulation, UI smoke
-.venv/bin/python -m pytest tests/integration   # real libvlc (silent dummy output)
+.venv/bin/python -m pytest tests/integration   # real libmpv (silent null output)
 ```
 
 Every scenario the app handles, with what verifies it and a manual release
@@ -92,8 +127,13 @@ Linux, Windows and macOS.
 
 ## Troubleshooting
 
-* **"Could not start" with a VLC hint:** install the desktop VLC matching your
-  Python's architecture.
+* **"Could not start" with a libmpv hint** (source installs only): install
+  libmpv as above.
+* **Quality line says "AAC (lossy)":** the Tidal login is the old kind. Settings >
+  Tidal & Quality > Log in to Tidal again.
+* **No "bit-perfect":** set the app volume to 100 and turn ReplayGain off. On
+  Windows, exclusive mode falls back to shared when another app holds the
+  device exclusively (see the log).
 * **You hear Spotify instead of Tidal:** the track has no confident Tidal match
   or its stream failed; the status line says which. Use **Fix match**.
 * **Spotify isn't muted (Linux):** its audio stream only appears once it plays;

@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.06] - 2026-10-31
+
+### Added
+- **Real lossless and hi-res**: Tidal now only streams FLAC to its newer (PKCE) login, as MPEG-DASH. The app logs in that way (a one-time browser login, pasting back the address you land on), offers the upgrade to existing logins, and plays DASH. Before this, every stream was AAC 320 kbps while the app said HI_RES_LOSSLESS
+- **Bit-perfect output**: Windows uses WASAPI exclusive mode (Settings toggle, on by default); Linux forces the PipeWire graph to the track's sample rate. The quality line shows the real format, e.g. "FLAC 24-bit/96 kHz · bit-perfect"
+- **Optional ReplayGain** from Tidal's track gain, capped so peaks never clip (off by default: it changes the samples)
+- **Release packages** built by CI: Windows .exe (libmpv bundled), AppImage, .deb and .rpm, each self-tested (`--self-test`) on a clean system, with SHA-256 checksums and signed build provenance
+- **Update check**: a button appears when a newer release exists. The .exe and AppImage update themselves after verifying the download's SHA-256; deb/rpm point to the release
+- Settings tab "Tidal & Quality"
+
+### Changed
+- **Player: libmpv instead of VLC.** VLC 3 could not play Tidal's DASH streams, had no exclusive mode on Windows, and its clock lagged the audio by up to 13s at the end of a song, which made the app replay endings
+- A stream that ends while Spotify is already at (or past) its end is a finished song, not a dropped stream
+- ISRC lookups fetch all releases in parallel (1.25s to 0.26s), shortening boundaries under the AI DJ, whose queue the API hides
+- VLC is no longer required
+
+### Removed
+- The Windows build no longer creates a self-signed certificate or adds it to the trusted root store
+
+### Fixed
+- Windows/macOS CI: importing the audio package no longer needs the player library
+- Windows: the instance lock no longer blocks reading the running instance's PID
+
 ## [v0.05] - 2026-10-31
 
 ### Added

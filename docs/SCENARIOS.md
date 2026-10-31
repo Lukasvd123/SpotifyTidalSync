@@ -10,18 +10,21 @@ Run the automated suite with:
 ```bash
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest tests                    # unit, scenario, UI smoke
-python -m pytest tests/integration        # real libvlc, needs VLC installed
+python -m pytest tests/integration        # real libmpv, silent null output
 ```
 
 CI (`.github/workflows/tests.yml`) runs the suite on Linux, Windows and macOS
-with Python 3.10, 3.12 and 3.13, plus the libvlc tests with VLC installed on
-each OS.
+with Python 3.10, 3.12 and 3.13, plus the libmpv tests on Ubuntu 22.04 (the
+oldest libmpv the packages ship), current Ubuntu and Windows.
+`.github/workflows/release.yml` builds every package and runs its
+`--self-test` on a clean system (Ubuntu 24.04 and Fedora containers for the
+deb and rpm).
 
 ## How the scenario tests work
 
 `tests/sim.py` runs the real `SyncEngine` and `PlaybackSource` against a fake
 world on a fake clock: a muted Spotify with a queue, crossfade, repeat and
-403-refused commands; a VLC that buffers, re-buffers on seek and can fail; a
+403-refused commands; a player that buffers, re-buffers on seek and can fail; a
 Tidal catalogue whose masters can be longer or shorter than Spotify's. A
 recorder samples who is audible every 50ms, so tests assert on what you would
 actually hear: silence at boundaries, both players audible at once, and seeks
@@ -119,10 +122,32 @@ of our stream.
 | FL12 | App killed or crashed while Spotify muted | Next start unmutes it (marker file) | all | PL2 |
 | FL13 | Expired Tidal access token | Refreshed before asking for a new login | all | TD9 |
 | FL14 | One track has no hi-res master | Only that track drops to lossless | all | TD6-TD7 |
-| FL15 | VLC not installed | Clear dialog with download link, no raw crash | all | **manual** |
+| FL15 | libmpv missing (source install) | Clear dialog with install hint, no raw crash | all | **manual** |
 | FL16 | Corrupt settings file | Defaults used, broken file kept as `.corrupt` | all | PL5 |
 | FL17 | Second instance | Refused, running instance untouched | all | PL7 |
 | FL18 | Suspend / resume of the PC | Like FL4 | all | **manual** |
+
+## Quality and output
+
+| ID | Scenario | Expected | Verified by |
+|----|----------|----------|-------------|
+| QA1 | Login from an older version (device code) | Tidal sends AAC: labelled "AAC (lossy)", PKCE upgrade offered once at start | TD11, TD13-15 |
+| QA2 | Hi-res master, PKCE login | DASH manifest played, label "FLAC 24-bit/…" | TD10, IN1-3 |
+| QA3 | Volume 100, ReplayGain off, exclusive / forced rate | "bit-perfect" shown; mpv output format equals the source | IN8, **manual** |
+| QA4 | Volume below 100 or ReplayGain on | Not shown as bit-perfect | IN8-9 |
+| QA5 | Another app holds the Windows device exclusively | Falls back to shared mode instead of silence | **manual** |
+| QA6 | Linux: other apps hold PipeWire at 48 kHz | Graph switches to the track's rate while playing | **manual** (verified on a KEF LSX II LT) |
+| QA7 | Old libmpv in the Linux packages (Ubuntu 22.04: 0.34) | loadfile without index, ReplayGain via a filter | IN10, CI |
+
+## Updates
+
+| ID | Scenario | Expected | Verified by |
+|----|----------|----------|-------------|
+| UP1-3 | Newer / same / no release | Offered only when newer; checksums attached | test |
+| UP4 | Release without asset digests | Checksums from `SHA256SUMS` | test |
+| UP5 | deb/rpm or source install | Points to the release page, never replaces files | test |
+| UP6 | Download does not match its checksum | Rejected, nothing replaced | test |
+| UP7-8 | AppImage / running .exe | Replaced in place (the .exe via rename), new version started | test, **manual** |
 
 ## Platform specifics
 
@@ -130,7 +155,7 @@ of our stream.
 |----|----------|----------|-------------|
 | LX1 | A browser playing video is listed before Spotify on D-Bus | Spotify is read and controlled | DT1-DT3 |
 | LX2 | Spotify native, Flatpak or Snap | Detected via MPRIS, stream found for muting | DT4, PL1, **manual** |
-| LX3 | PipeWire stream-restore re-mutes our VLC stream | Our own stream (by PID) is unmuted; volume untouched | **manual** |
+| LX3 | PipeWire stream-restore re-mutes our player's stream | Our own stream (by PID) is unmuted; volume untouched | **manual** |
 | LX4 | Seek without the API | MPRIS `SetPosition` | **manual** |
 | WN1 | Another app is the "current" media session (browser) | Commands go to Spotify's session, not the browser | **manual** |
 | WN2 | SMTC timeline goes stale | Position extrapolated from `last_updated_time` | DT8, ST5 |
