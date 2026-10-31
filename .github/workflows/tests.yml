@@ -1,0 +1,66 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    name: unit + scenarios (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install tidalapi python-vlc requests pillow keyring spotipy pytest
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python -m pip install pycaw winrt-Windows.Media.Control winrt-Windows.Foundation
+          fi
+      - name: Install a display for the UI smoke test
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m pytest -v tests --ignore=tests/integration
+          else
+            python -m pytest -v tests --ignore=tests/integration
+          fi
+
+  vlc:
+    name: real libvlc (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install VLC
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   sudo apt-get update && sudo apt-get install -y vlc libvlc-dev ;;
+            Windows) choco install vlc -y --no-progress ;;
+            macOS)   brew install --cask vlc ;;
+          esac
+      - name: Install dependencies
+        run: python -m pip install python-vlc requests keyring pytest
+      - name: Run integration tests
+        env:
+          REQUIRE_VLC: "1"
+        run: python -m pytest -v -rs tests/integration
