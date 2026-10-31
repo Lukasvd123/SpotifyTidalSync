@@ -4,6 +4,53 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.05] - 2026-10-31
+
+### Added
+- **Scenario test suite**: the real sync engine runs against a simulated Spotify, VLC and Tidal on a fake clock, asserting on what is audible (gaps, double audio, seeks). Plus unit tests, a UI smoke test and real-libvlc integration tests. See `docs/SCENARIOS.md`
+- **CI** on Linux, Windows and macOS (Python 3.10/3.12/3.13), with VLC installed for the integration tests
+- **Gapless switches**: the next queue track is pre-buffered in a standby player
+- **ISRC matching** and progressive search (title + artist, title + album, title)
+- **Auto-match cache**: confident matches are remembered, replays skip the search
+- **"Not on Tidal"** button: the track plays from Spotify from then on, no popup
+- **Volume slider** in the app; match method and confidence shown under the quality
+- **Stream recovery**: a dropped stream reconnects at the same position
+- **Podcast and ad pass-through**, and playback on another device is left alone
+- **Crash-safe muting**: a marker file lets the next start unmute Spotify
+- MPRIS seek (`SetPosition`) and SMTC seek without the Spotify API
+- New logo: the interlaced note, now white on a gradient disc so it shows on light and dark taskbars
+
+### Changed
+- When the Tidal master ends before Spotify's, Spotify is skipped forward instead of waited for (the 1-6s gaps)
+- Mid-song starts open the stream at the position instead of seeking after playback began
+- Seeks are only followed when confirmed by a second reading and our player is not already there
+- No match or a failed stream unmutes Spotify instead of leaving silence; the popup appears once per track
+- UI actions go through a command queue run by the sync loop
+- Matching: title must actually match (numbers and words), all credited artists count, album and runtime weigh in, generic study titles need a close runtime, instrumental-only releases accepted when everything else agrees
+- Linux: Spotify is chosen over other players, controls target the same player that is read, Spotify ids and art read from MPRIS
+- Windows: controls target Spotify's session (not the "current" one), SMTC positions extrapolated, DPI aware
+- Tidal login retries while offline and refreshes expired tokens before asking for a new login
+- Log is UTF-8 and the previous run is kept as `debug.log.1`
+- macOS shows a clear "not supported yet" message
+
+### Fixed
+- 1-6s silence at track boundaries when the Tidal master was shorter
+- Jumps and stutters shortly after a track started
+- One track without hi-res downgrading every later track to lossless
+- A different song by the same artist being played when the right one was missing
+- All Japanese/Korean/Cyrillic/Arabic titles sharing one mapping key
+- Playing every track in between after a burst of skips
+- Silence for the rest of a song after a long pause or suspend
+- Duplicate tracks and repeat-one leaving silence
+- Local files not being detected
+- Phone playback being mirrored on the PC and paused by the app
+- Spotify left muted after a crash, kill or factory reset
+- Our own VLC stream (and the user's VLC) being forced to 100% volume
+- Second instance truncating the running instance's lock file
+
+### Removed
+- Community corrections and the VB-Cable tab (dropped in the package refactor; README updated)
+
 ## [v0.04] - 2026-03-21
 
 ### Added
