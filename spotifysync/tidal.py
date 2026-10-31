@@ -16,6 +16,11 @@ from .config import MATCH_CACHE_FILE, logger
 from .matching import (CONFIDENT_SCORE, NOT_ON_TIDAL, MappingStore, TrackQuery, describe,
                        legacy_mapping_key, make_mapping_key, pick_best, search_title)
 
+# Tidal lists a popular song once per album it appears on (often 50+). Hi-res
+# originals are frequently past the first page, behind CD-only compilations.
+ISRC_PAGES = 5
+ISRC_FETCH = 10
+
 # Tidal stream URLs are signed and time limited. Treat a prefetched one as stale
 # well before that so we never hand the player a dead link.
 STREAM_URL_TTL = 240.0
@@ -33,6 +38,13 @@ class LoginResult:
     OK = "ok"
     OFFLINE = "offline"
     FAILED = "failed"
+
+
+def is_hires(track):
+    try:
+        return bool(track.is_hi_res_lossless)
+    except Exception:
+        return False
 
 
 def _tidalapi():
@@ -357,12 +369,21 @@ class TidalLibrary:
     def _search_match(self, query):
         if query.isrc:
             tracks = self._by_isrc(query.isrc)
-            if tracks:
-                track, score = pick_best(tracks, query)
-                # Same recording by definition; the scorer just picks the best
-                # of several releases and guards against bad ISRC data.
+            hires = [t for t in tracks if is_hires(t)]
+            if tracks and not hires:
+                # Hits sit on 100+ compilations; search ranks the original
+                # release first, which is often the hi-res one.
+                text = f"{search_title(query.title)} {query.artist}".strip()
+                hires = [t for t in self.search(text)
+                         if getattr(t, "isrc", None) == query.isrc and is_hires(t)]
+            # Same recording by definition; the scorer just picks the best
+            # of several releases and guards against bad ISRC data. A hi-res
+            # release of the recording beats a closer-named CD compilation.
+            for pool in (hires, tracks):
+                track, score = pick_best(pool, query) if pool else (None, 0)
                 if track is not None:
-                    logger.info(f"Matched '{query.title}' by ISRC")
+                    logger.info(f"Matched '{query.title}' by ISRC"
+                                + (" (hi-res release)" if is_hires(track) else ""))
                     return Match(track, "isrc", score)
 
         title = search_title(query.title)
@@ -388,14 +409,28 @@ class TidalLibrary:
             logger.warning(f"No confident match for '{query.title}' by '{query.artist}' "
                            f"(best score {best_score:.0f})")
             return None
+        best = self._hires_twin(best, pool)
         logger.info(f"Matched '{describe(best).title}' by '{query.artist}' (score {best_score:.0f})")
         return Match(best, "search", best_score)
 
+    @staticmethod
+    def _hires_twin(best, pool):
+        """A hi-res release of the same recording (same ISRC) as `best`."""
+        isrc = getattr(best, "isrc", None)
+        if not isrc or is_hires(best):
+            return best
+        for cand in pool:
+            if getattr(cand, "isrc", None) == isrc and is_hires(cand):
+                return cand
+        return best
+
     def _by_isrc(self, isrc):
-        ids = self._isrc_ids(isrc)
-        if ids is not None:
-            # tidalapi fetches each release one by one; at a track boundary
-            # that was seconds of silence for an ISRC with several releases.
+        found = self._isrc_ids(isrc)
+        if found is not None:
+            # Hi-res releases first, then the rest in Tidal's order, and only
+            # a handful: tidalapi fetches each release one by one.
+            ids = [tid for tid, hires in found if hires] + [tid for tid, hires in found if not hires]
+            ids = ids[:ISRC_FETCH]
             with ThreadPoolExecutor(max_workers=min(8, len(ids) or 1)) as pool:
                 return [t for t in pool.map(self.track_by_id, ids) if t is not None]
         getter = getattr(self.session, "get_tracks_by_isrc", None)
@@ -408,19 +443,28 @@ class TidalLibrary:
             return []
 
     def _isrc_ids(self, isrc):
-        """Track ids for an ISRC from Tidal's v2 catalogue, or None when that
-        endpoint is unavailable (then tidalapi's own lookup is used)."""
+        """(track id, is hi-res) for every release of an ISRC in Tidal's v2
+        catalogue, or None when that endpoint is unavailable (then tidalapi's
+        own lookup is used)."""
         request = getattr(self.session, "request", None)
         base = getattr(getattr(self.session, "config", None), "openapi_v2_location", None)
         if request is None or not base:
             return None
-        try:
-            res = request.request("GET", "tracks", params={"filter[isrc]": isrc},
-                                  base_url=base).json()
-            return [item["id"] for item in res.get("data") or []]
-        except Exception as e:
-            logger.debug(f"ISRC lookup failed for {isrc}: {e}")
-            return None
+        found, params = [], {"filter[isrc]": isrc}
+        for _ in range(ISRC_PAGES):
+            try:
+                res = request.request("GET", "tracks", params=params, base_url=base).json()
+            except Exception as e:
+                logger.debug(f"ISRC lookup failed for {isrc}: {e}")
+                return found or None
+            for item in res.get("data") or []:
+                tags = (item.get("attributes") or {}).get("mediaTags") or []
+                found.append((item["id"], "HIRES_LOSSLESS" in tags))
+            cursor = ((res.get("links") or {}).get("meta") or {}).get("nextCursor")
+            if not cursor:
+                break
+            params = {"filter[isrc]": isrc, "page[cursor]": cursor}
+        return found
 
     def save_mapping(self, key, tidal_id, spotify_id=None):
         self.mappings.put(key, tidal_id)

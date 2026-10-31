@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Hi-res releases were skipped** for songs that are also on CD-quality compilations: the ISRC lookup read only the first page of releases and took the closest name, so e.g. "Torn" played 16-bit/44.1 while Tidal has it at 24-bit. Hi-res releases of the same recording now win, and previously cached matches are looked up again once
+
 ## [v0.06] - 2026-10-31
 
 ### Added

@@ -15,12 +15,15 @@ Q = tidalapi.Quality
 
 
 class FakeTrack:
-    def __init__(self, tid, name, artist="Artist", duration=200, refuse=()):
+    def __init__(self, tid, name, artist="Artist", duration=200, refuse=(), hires=False,
+                 isrc=None, album="Album"):
         self.id = tid
+        self.is_hi_res_lossless = hires
+        self.isrc = isrc
         self.name = self.full_name = name
         self.artist = NS(name=artist)
         self.artists = [self.artist]
-        self.album = NS(name="Album")
+        self.album = NS(name=album)
         self.duration = duration
         self.refuse = set(refuse)
         self.session = None
@@ -84,7 +87,7 @@ def test_TD2_not_on_tidal_is_remembered(library):
 
 
 def test_TD3_isrc_is_tried_first(library):
-    lib = library([FakeTrack(1, "Song"), FakeTrack(7, "Song")], isrc={"USX1": [7]})
+    lib = library([FakeTrack(1, "Song"), FakeTrack(7, "Song", hires=True)], isrc={"USX1": [7]})
     match = lib.find_match(TrackQuery("Song", "Artist", duration_ms=200000, isrc="USX1"))
     assert match.track.id == 7 and match.method == "isrc"
     assert lib.session.queries == []
@@ -245,3 +248,60 @@ def test_TD15_pkce_login_is_not_asked_again(library, monkeypatch):
     _pkce_session(lib, saved, monkeypatch, old_pkce=True)
     assert lib.login(ask_redirect=lambda url: 1 / 0) == tidal.LoginResult.OK
     assert lib.is_pkce
+
+
+class V2Request:
+    """Tidal's v2 /tracks?filter[isrc]= endpoint, 2 items per page."""
+
+    def __init__(self, items):
+        self.items, self.calls = items, []
+
+    def request(self, method, path, params=None, base_url=None):
+        self.calls.append(dict(params))
+        start = int(params.get("page[cursor]", 0))
+        page = self.items[start:start + 2]
+        links = {"meta": {"nextCursor": str(start + 2)}} if start + 2 < len(self.items) else {}
+        data = [{"id": tid, "attributes": {"mediaTags": ["LOSSLESS"] + (["HIRES_LOSSLESS"] if hi else [])}}
+                for tid, hi in page]
+        return NS(json=lambda: {"data": data, "links": links})
+
+
+def _v2(lib, items):
+    lib.session.request = V2Request(items)
+    lib.session.config.openapi_v2_location = "https://openapi.tidal.com/v2/"
+    return lib.session.request
+
+
+def test_TD16_isrc_prefers_a_hi_res_release_on_a_later_page(library):
+    tracks = [FakeTrack(1, "Song", album="Hits 2024"), FakeTrack(2, "Song", album="Now 99"),
+              FakeTrack(3, "Song", album="Album", hires=True)]
+    lib = library(tracks)
+    req = _v2(lib, [(1, False), (2, False), (3, True)])
+    match = lib.find_match(TrackQuery("Song", "Artist", album="Hits 2024",
+                                      duration_ms=200000, isrc="USX1"))
+    assert match.track.id == 3 and match.method == "isrc"
+    assert len(req.calls) == 2 and req.calls[1]["page[cursor]"] == "2"
+
+
+def test_TD17_isrc_without_hi_res_still_matches(library):
+    lib = library([FakeTrack(1, "Song"), FakeTrack(2, "Other")])
+    _v2(lib, [(1, False), (2, False)])
+    match = lib.find_match(TrackQuery("Song", "Artist", duration_ms=200000, isrc="USX1"))
+    assert match.track.id == 1 and match.method == "isrc"
+
+
+def test_TD18_search_swaps_to_hi_res_twin_of_same_recording(library):
+    lib = library([FakeTrack(1, "Song", isrc="USX1", album="Album"),
+                   FakeTrack(2, "Song", isrc="USX1", album="Best Of", hires=True),
+                   FakeTrack(3, "Song", isrc="USX9", album="Live", hires=True)])
+    match = lib.find_match(TrackQuery("Song", "Artist", album="Album", duration_ms=200000))
+    assert match.track.id == 2
+
+
+def test_TD19_hi_res_release_missed_by_isrc_paging_is_found_by_search(library):
+    lib = library([FakeTrack(1, "Song", album="Hits"),
+                   FakeTrack(2, "Song", isrc="USX1", album="Song", hires=True),
+                   FakeTrack(3, "Song", isrc="USX9", album="Live", hires=True)])
+    _v2(lib, [(1, False)])
+    match = lib.find_match(TrackQuery("Song", "Artist", duration_ms=200000, isrc="USX1"))
+    assert match.track.id == 2 and match.method == "isrc"

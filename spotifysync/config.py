@@ -42,7 +42,8 @@ os.makedirs(APPDATA_DIR, exist_ok=True)
 
 SETTINGS_FILE = os.path.join(APPDATA_DIR, "settings.json")
 MAPPINGS_FILE = os.path.join(APPDATA_DIR, "mappings.json")
-MATCH_CACHE_FILE = os.path.join(APPDATA_DIR, "match_cache.json")
+# v2: v1 cached CD compilations picked over hi-res releases of the same ISRC.
+MATCH_CACHE_FILE = os.path.join(APPDATA_DIR, "match_cache_v2.json")
 LOG_FILE = os.path.join(APPDATA_DIR, "debug.log")
 MUTE_MARKER_FILE = os.path.join(APPDATA_DIR, "muted.flag")
 
